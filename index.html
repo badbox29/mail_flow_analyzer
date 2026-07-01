@@ -286,20 +286,42 @@ textarea::placeholder{color:var(--text-muted);}
     print-color-adjust: exact !important;
   }
 
-  /* Force light backgrounds on dark interactive elements */
-  .sig-card-hd, .sig-row, .sig-summary, .sig-detail,
-  .xhdr-body, .auth-expand-body, .auth-expand-hd,
-  .hop-card, .hop-detail, .hd-item, .hop-notes,
-  .hop-raw, .raw-viewer, .sum-item, .ms-item,
-  .sec-item, .rpt-sec-item, .card, .card2 {
+  /* Re-declare ALL CSS variables to light values so inline var() styles resolve correctly */
+  #print-frame {
+    --bg-page:#fff; --bg-card:#fff; --bg-card2:#f5f5fa; --bg-input:#f0f0f8;
+    --border:#d0d0e0; --border-light:#b0b0cc;
+    --text-primary:#1a1a2e; --text-secondary:#5a5a78; --text-muted:#9090a8;
+    --blue:#1d4ed8; --blue-dim:#eff6ff;
+    --green:#166534; --green-dim:#f0fdf4;
+    --orange:#92400e; --orange-dim:#fffbeb;
+    --red:#991b1b; --red-dim:#fef2f2;
+    --purple:#6d28d9; --purple-dim:#f5f3ff;
+    --cyan:#0e7490; --cyan-dim:#ecfeff;
     background: #fff !important;
     color: #1a1a2e !important;
   }
-  /* Hide interactive chrome not in print-frame */
-  .topbar, .mode-tabs, .btn-primary, .btn-secondary, .btn-ghost,
-  .report-overlay, .settings-overlay, .toast,
-  .timeline-controls, .hop-raw-toggle, .chevron,
-  .sig-chevron, .xhdr-chev, a[href] { display: none !important; }
+
+  /* Ensure no dark backgrounds on any child element in the print frame */
+  #print-frame * {
+    background-color: transparent;
+  }
+  /* Restore explicit backgrounds for elements that need them */
+  #print-frame .rpt-item,
+  #print-frame .rpt-ms-item,
+  #print-frame .rpt-sec-item { background-color: #f5f5fa !important; }
+  #print-frame .rpt-finding,
+  #print-frame .rpt-invpoint.info { background-color: #eff6ff !important; }
+  #print-frame .rpt-invpoint.clear,
+  #print-frame .rpt-auth-item.pass,
+  #print-frame .rpt-hop.last { background-color: #f0fdf4 !important; }
+  #print-frame .rpt-invpoint.warn,
+  #print-frame .rpt-hop.warn { background-color: #fffbeb !important; }
+  #print-frame .rpt-invpoint.critical,
+  #print-frame .rpt-hop.crit,
+  #print-frame .rpt-auth-item.fail { background-color: #fef2f2 !important; }
+  #print-frame .rpt-auth-item.soft { background-color: #fffbeb !important; }
+  #print-frame .rpt-hop,
+  #print-frame .rpt-auth-item { background-color: #fff !important; }
 
   /* Hide everything except the print frame */
   body > *:not(#print-frame) { display: none !important; }
