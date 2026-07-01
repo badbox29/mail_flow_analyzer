@@ -253,6 +253,9 @@ textarea::placeholder{color:var(--text-muted);}
 .s-input{width:100%;background:var(--bg-input);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-family:'JetBrains Mono',monospace;font-size:12px;padding:8px 12px;outline:none;transition:border-color .15s;}
 .s-input:focus{border-color:var(--blue);}
 .s-input::placeholder{color:var(--text-muted);}
+.s-textarea{width:100%;background:var(--bg-input);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.6;padding:8px 12px;outline:none;transition:border-color .15s;resize:vertical;min-height:38px;}
+.s-textarea:focus{border-color:var(--blue);}
+.s-textarea::placeholder{color:var(--text-muted);}
 .s-conditional{display:none;padding:12px 14px;background:var(--bg-card2);border-radius:8px;border:1px solid var(--border);margin-top:8px;}
 .s-conditional.visible{display:block;}
 .settings-modal-footer{display:flex;gap:8px;justify-content:flex-end;padding-top:14px;border-top:1px solid var(--border);margin-top:4px;}
@@ -485,6 +488,7 @@ textarea::placeholder{color:var(--text-muted);}
     <div class="s-tabs">
       <button class="s-tab active" onclick="switchSettingsTab('environment',this)">Environment</button>
       <button class="s-tab" onclick="switchSettingsTab('security',this)">Security</button>
+      <button class="s-tab" onclick="switchSettingsTab('io',this)">Import / Export</button>
     </div>
 
     <!-- ENVIRONMENT TAB -->
@@ -508,12 +512,12 @@ textarea::placeholder{color:var(--text-muted);}
       <div class="s-conditional" id="s-cond-hybrid">
         <div class="s-row">
           <label class="s-label">On-Premises Exchange Server Hostnames</label>
-          <input class="s-input" id="s-hybrid-hosts" placeholder="mail.corp.local, exch01.internal, mbx02.domain.com" />
+          <textarea class="s-textarea" id="s-hybrid-hosts" rows="2" oninput="autoGrow(this)" placeholder="mail.corp.local, exch01.internal, mbx02.domain.com"></textarea>
           <div class="s-hint">Comma-separated hostnames or FQDNs. These will be recognized as internal Exchange servers in the hop timeline.</div>
         </div>
         <div class="s-row" style="margin-bottom:0;">
           <label class="s-label">Hybrid Connector FQDNs <span style="font-weight:400;color:var(--text-muted);">(optional)</span></label>
-          <input class="s-input" id="s-hybrid-connector" placeholder="hybrid1.yourdomain.com, hybrid2.yourdomain.com" />
+          <textarea class="s-textarea" id="s-hybrid-connector" rows="2" oninput="autoGrow(this)" placeholder="hybrid1.yourdomain.com, hybrid2.yourdomain.com"></textarea>
           <div class="s-hint">Comma-separated FQDNs of your hybrid connectors. Helps identify hybrid routing hops in the timeline.</div>
         </div>
       </div>
@@ -521,7 +525,7 @@ textarea::placeholder{color:var(--text-muted);}
       <div class="s-conditional" id="s-cond-onprem-exchange">
         <div class="s-row" style="margin-bottom:0;">
           <label class="s-label">Exchange Server Hostnames</label>
-          <input class="s-input" id="s-onprem-exchange-hosts" placeholder="mail.corp.local, exch01.internal" />
+          <textarea class="s-textarea" id="s-onprem-exchange-hosts" rows="2" oninput="autoGrow(this)" placeholder="mail.corp.local, exch01.internal"></textarea>
           <div class="s-hint">Comma-separated hostnames or FQDNs of your Exchange servers.</div>
         </div>
       </div>
@@ -529,7 +533,7 @@ textarea::placeholder{color:var(--text-muted);}
       <div class="s-conditional" id="s-cond-onprem-other">
         <div class="s-row" style="margin-bottom:0;">
           <label class="s-label">MTA Server Hostnames</label>
-          <input class="s-input" id="s-onprem-other-hosts" placeholder="mail.yourdomain.com, smtp-relay.internal" />
+          <textarea class="s-textarea" id="s-onprem-other-hosts" rows="2" oninput="autoGrow(this)" placeholder="mail.yourdomain.com, smtp-relay.internal"></textarea>
           <div class="s-hint">Comma-separated hostnames. These will be recognized as internal mail servers in the hop timeline.</div>
         </div>
       </div>
@@ -607,12 +611,12 @@ textarea::placeholder{color:var(--text-muted);}
         <div class="s-group-title">Organization Domains</div>
         <div class="s-row">
           <label class="s-label">Internal / Owned Domains</label>
-          <input class="s-input" id="s-internal-domains" placeholder="yourcompany.com, yourcompany.net, corp.yourcompany.com" />
+          <textarea class="s-textarea" id="s-internal-domains" rows="2" oninput="autoGrow(this)" placeholder="yourcompany.com, yourcompany.net, corp.yourcompany.com"></textarea>
           <div class="s-hint">Comma-separated list of domains your organization owns and sends from. Used to detect lookalike domains and impersonation. <b>Fill this in for best results.</b></div>
         </div>
         <div class="s-row" style="margin-bottom:0;">
           <label class="s-label">Trusted Sender Domains <span style="font-weight:400;color:var(--text-muted);">(optional)</span></label>
-          <input class="s-input" id="s-trusted-domains" placeholder="knownvendor.com, partner.org, mailjet.com" />
+          <textarea class="s-textarea" id="s-trusted-domains" rows="2" oninput="autoGrow(this)" placeholder="knownvendor.com, partner.org, mailjet.com"></textarea>
           <div class="s-hint">Comma-separated list of known-good external domains (partners, vendors, ESPs). These are treated as legitimate and never flagged as lookalikes or spoofs.</div>
         </div>
       </div>
@@ -621,7 +625,7 @@ textarea::placeholder{color:var(--text-muted);}
         <div class="s-group-title">Impersonation Protection</div>
         <div class="s-row" style="margin-bottom:0;">
           <label class="s-label">VIP / Executive Names <span style="font-weight:400;color:var(--text-muted);">(optional)</span></label>
-          <input class="s-input" id="s-vip-names" placeholder="Jane Smith, John Doe, CEO, CFO, IT Support, Helpdesk" />
+          <textarea class="s-textarea" id="s-vip-names" rows="2" oninput="autoGrow(this)" placeholder="Jane Smith, John Doe, CEO, CFO, IT Support, Helpdesk"></textarea>
           <div class="s-hint">Comma-separated names or titles to watch for. If an external sender's display name contains one of these but sends from a domain not in your internal or trusted lists, it will be flagged as potential impersonation.</div>
         </div>
       </div>
@@ -630,6 +634,37 @@ textarea::placeholder{color:var(--text-muted);}
         ℹ These settings power three Security Signals: <b>lookalike domain</b> detection, <b>domain-in-display-name</b> spoofing, and <b>VIP name</b> spoofing. Each check only runs when its relevant field is filled in.
       </div>
     </div><!-- /security tab -->
+
+    <!-- IMPORT / EXPORT TAB -->
+    <div class="s-tabpanel" id="s-tab-io">
+      <div class="s-group">
+        <div class="s-group-title">Export Settings</div>
+        <p class="s-hint" style="margin-bottom:10px;">Save your current settings to a file or copy them to share with a teammate or move to another machine.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn-secondary" onclick="exportSettingsFile()">⬇ Download Settings File</button>
+          <button class="btn-secondary" onclick="copySettingsJSON()">📋 Copy to Clipboard</button>
+        </div>
+      </div>
+
+      <div class="s-group">
+        <div class="s-group-title">Import Settings</div>
+        <p class="s-hint" style="margin-bottom:10px;">Load a settings file, or paste exported settings JSON below.</p>
+        <div class="s-row">
+          <label class="s-label">Load from File</label>
+          <input type="file" accept=".json,application/json" id="s-import-file" onchange="importSettingsFile(event)"
+            style="font-size:12px;color:var(--text-secondary);font-family:'DM Sans',sans-serif;" />
+        </div>
+        <div class="s-row">
+          <label class="s-label">Or Paste Settings JSON</label>
+          <textarea class="s-textarea" id="s-import-paste" rows="4" placeholder='{"mailSystem":"hybrid","internalDomains":"..."}'></textarea>
+        </div>
+        <label class="s-label" style="display:flex;align-items:center;gap:8px;font-weight:400;cursor:pointer;margin-bottom:10px;">
+          <input type="checkbox" id="s-import-autosave" style="width:15px;height:15px;cursor:pointer;">
+          Apply and save immediately without review
+        </label>
+        <button class="btn-primary" onclick="importSettingsPaste()">Import Settings</button>
+      </div>
+    </div><!-- /io tab -->
 
     <div class="settings-modal-footer">
       <button class="btn-secondary" onclick="clearSettings()">Clear All</button>
@@ -2988,9 +3023,110 @@ function switchSettingsTab(tab,btn){
   document.getElementById('s-tab-'+tab).classList.add('active');
 }
 
+function autoGrow(el){
+  el.style.height='auto';
+  el.style.height=(el.scrollHeight+2)+'px';
+}
+
+// Collect current settings from the form into an object
+function collectSettings(){
+  return {
+    mailSystem:document.getElementById('s-mail-system').value,
+    hybridHosts:document.getElementById('s-hybrid-hosts').value.trim(),
+    hybridConnector:document.getElementById('s-hybrid-connector').value.trim(),
+    onpremExchangeHosts:document.getElementById('s-onprem-exchange-hosts').value.trim(),
+    onpremOtherHosts:document.getElementById('s-onprem-other-hosts').value.trim(),
+    googleDomain:document.getElementById('s-google-domain').value.trim(),
+    inboundFilter:document.getElementById('s-inbound-filter').value,
+    inboundHost:document.getElementById('s-inbound-host').value.trim(),
+    outboundFilter:document.getElementById('s-outbound-filter').value,
+    outboundHost:document.getElementById('s-outbound-host').value.trim(),
+    internalDomains:document.getElementById('s-internal-domains').value.trim(),
+    trustedDomains:document.getElementById('s-trusted-domains').value.trim(),
+    vipNames:document.getElementById('s-vip-names').value.trim(),
+  };
+}
+
+function exportSettingsFile(){
+  const s=loadSettings();
+  const payload={_app:'Mail Flow Analyzer',_type:'settings',_version:'1.6',...s};
+  const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;a.download='mail-flow-analyzer-settings.json';
+  document.body.appendChild(a);a.click();
+  document.body.removeChild(a);URL.revokeObjectURL(url);
+  showToast('✓ Settings exported');
+}
+
+function copySettingsJSON(){
+  const s=loadSettings();
+  const payload={_app:'Mail Flow Analyzer',_type:'settings',_version:'1.6',...s};
+  navigator.clipboard.writeText(JSON.stringify(payload,null,2)).then(()=>showToast('✓ Copied to clipboard'));
+}
+
+function applyImportedSettings(obj){
+  // Strip metadata keys
+  const {_app,_type,_version,...s}=obj;
+  populateSettingsForm(s);
+  // Re-grow any textareas that now have content
+  document.querySelectorAll('.s-textarea').forEach(t=>autoGrow(t));
+  if(document.getElementById('s-import-autosave').checked){
+    saveSettings();
+    showToast('✓ Settings imported and saved');
+  } else {
+    showToast('✓ Settings loaded — review, then Save');
+    switchSettingsTab('environment',document.querySelector('.s-tab'));
+  }
+}
+
+function importSettingsFile(event){
+  const file=event.target.files[0];
+  if(!file)return;
+  const reader=new FileReader();
+  reader.onload=e=>{
+    try{
+      const obj=JSON.parse(e.target.result);
+      if(obj._type&&obj._type!=='settings')throw new Error('not a settings file');
+      applyImportedSettings(obj);
+    }catch(err){
+      showToastError('✗ Invalid settings file');
+    }
+    event.target.value='';
+  };
+  reader.readAsText(file);
+}
+
+function importSettingsPaste(){
+  const raw=document.getElementById('s-import-paste').value.trim();
+  if(!raw){showToastError('✗ Paste settings JSON first');return;}
+  try{
+    const obj=JSON.parse(raw);
+    if(obj._type&&obj._type!=='settings')throw new Error('not a settings file');
+    applyImportedSettings(obj);
+    document.getElementById('s-import-paste').value='';
+  }catch(err){
+    showToastError('✗ Invalid JSON');
+  }
+}
+
+function showToastError(msg){
+  const t=document.getElementById('toast');
+  t.textContent=msg;
+  t.style.borderColor='var(--red)';
+  t.style.color='var(--red)';
+  t.classList.add('show');
+  setTimeout(()=>{
+    t.classList.remove('show');
+    setTimeout(()=>{t.style.borderColor='';t.style.color='';},300);
+  },2500);
+}
+
 function openSettingsModal(){
   populateSettingsForm(loadSettings());
   document.getElementById('settingsOverlay').classList.add('open');
+  // Grow textareas to fit existing content
+  setTimeout(()=>document.querySelectorAll('.s-textarea').forEach(t=>autoGrow(t)),10);
 }
 
 function closeSettingsModal(){
