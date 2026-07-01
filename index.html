@@ -1745,16 +1745,20 @@ function decodeHeaders(){
     <div style="flex:1;">
       <div style="font-size:15px;font-weight:600;">Security Signals</div>
       <div style="font-size:12px;color:var(--text-secondary);margin-top:1px;">
-        ${allClear?'No anomalies detected across '+secSignals.length+' checks':
+        ${allClear?'All '+secSignals.length+' checks passed — no anomalies detected':
           secSignals.filter(s=>s.level!=='clear').length+' signal'+(secSignals.filter(s=>s.level!=='clear').length!==1?'s':'')+' detected across '+secSignals.length+' checks'}
       </div>
     </div>
     <span id="${sigChevId}" class="xhdr-chev${sigStartOpen?' open':''}" style="color:${scm.hdrColor};">▼</span>
   </div>
   <div id="${sigBodyId}" class="xhdr-body${sigStartOpen?' open':''}" style="padding:14px 16px;">
-    <div class="sig-grid">`;
+    ${allClear
+      ? `<div style="font-size:13px;color:var(--text-secondary);">No anomalies detected. Reply-To, Message-ID, mail loop, TLS, Return-Path, SCL/BCL, and recipient routing all checked out.</div>`
+      : `<div class="sig-grid">`
+    }`;
 
   secSignals.forEach(sig=>{
+    if(sig.level==='clear')return; // only render signals that fired
     const isOpen=autoExpand.has(sig.id);
     const hasDetail=!!(sig.detail||sig.values);
     html+=`<div class="sig-row${sig.level!=='clear'?' sig-'+sig.level:''}" id="sigrow-${esc(sig.id)}"
@@ -1773,7 +1777,7 @@ function decodeHeaders(){
     </div>`;
   });
 
-  html+=`</div></div></div>`;
+  html+=`${allClear?'':'</div>'}</div></div>`;
 
   // ── 3. AUTHENTICATION SUMMARY ────────────────────────────────────────────
   // Extract sender domain for contextual wording
