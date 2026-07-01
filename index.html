@@ -286,6 +286,21 @@ textarea::placeholder{color:var(--text-muted);}
     print-color-adjust: exact !important;
   }
 
+  /* Force light backgrounds on dark interactive elements */
+  .sig-card-hd, .sig-row, .sig-summary, .sig-detail,
+  .xhdr-body, .auth-expand-body, .auth-expand-hd,
+  .hop-card, .hop-detail, .hd-item, .hop-notes,
+  .hop-raw, .raw-viewer, .sum-item, .ms-item,
+  .sec-item, .rpt-sec-item, .card, .card2 {
+    background: #fff !important;
+    color: #1a1a2e !important;
+  }
+  /* Hide interactive chrome not in print-frame */
+  .topbar, .mode-tabs, .btn-primary, .btn-secondary, .btn-ghost,
+  .report-overlay, .settings-overlay, .toast,
+  .timeline-controls, .hop-raw-toggle, .chevron,
+  .sig-chevron, .xhdr-chev, a[href] { display: none !important; }
+
   /* Hide everything except the print frame */
   body > *:not(#print-frame) { display: none !important; }
   #print-frame { display: block !important; }
@@ -2337,6 +2352,7 @@ function decodeHeaders(){
     hopsWithPct,totalDelay,
     ms,
     recipientChanged,originalRecipient,finalRecipient,recipientChangeEvidence,
+    secSignals,
   };
   document.getElementById('printBtn').style.display='flex';
 
@@ -2573,11 +2589,30 @@ function generateReport(){
       <div class="find-lbl">🔍 Most Likely Finding</div>
       <div class="find-text">${esc(d.findingText)}</div>
     </div>
-    ${d.recipientChanged?`<div style="background:#ecfeff;border:1px solid #a5f3fc;border-radius:6px;padding:10px 14px;margin-top:8px;">
-      <div style="font-size:11px;font-weight:700;color:#0e7490;margin-bottom:4px;">🔀 Recipient Changed During Delivery</div>
-      <div style="font-size:11px;color:#374151;line-height:1.5;">Originally addressed to <b>${esc(d.originalRecipient)}</b>, delivered to <b>${esc(d.finalRecipient)}</b>. Consistent with a mail flow rule, forwarding rule, distribution group expansion, alias, or compliance redirect.</div>
-    </div>`:''}
   </div>`;
+  }
+
+  // ── SECURITY SIGNALS ───────────────────────────────────────────────────────
+  if(d.secSignals&&(sections.exec||sections.security||_selectedReportType==='full')){
+    const firedSignals=(d.secSignals||[]).filter(s=>s.level!=='clear');
+    if(firedSignals.length){
+      const sigLevelColor={info:'#0369a1',warn:'#92400e',critical:'#991b1b'};
+      const sigLevelBg={info:'#eff6ff',warn:'#fffbeb',critical:'#fef2f2'};
+      const sigLevelBorder={info:'#bfdbfe',warn:'#fde68a',critical:'#fecaca'};
+      html+=`<div class="rpt-section">
+      <div class="rpt-section-title">Security Signals — ${firedSignals.length} of ${d.secSignals.length} checks flagged</div>
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        ${firedSignals.map(s=>`<div style="display:flex;align-items:flex-start;gap:10px;padding:8px 12px;background:${sigLevelBg[s.level]||'#f8f9fc'};border:1px solid ${sigLevelBorder[s.level]||'#d0d0e0'};border-radius:6px;">
+          <span style="font-size:13px;flex-shrink:0;">${s.icon}</span>
+          <div style="flex:1;">
+            <div style="font-size:11px;font-weight:700;color:${sigLevelColor[s.level]||'#374151'};margin-bottom:2px;">${esc(s.name)}</div>
+            <div style="font-size:11px;color:#374151;line-height:1.5;">${esc(s.summary)}</div>
+            ${s.values?`<div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#64748b;margin-top:3px;">${esc(s.values)}</div>`:''}
+          </div>
+        </div>`).join('')}
+      </div>
+    </div>`;
+    }
   }
 
   // ── INVESTIGATION POINT ────────────────────────────────────────────────────
