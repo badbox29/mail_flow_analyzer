@@ -280,6 +280,15 @@ textarea::placeholder{color:var(--text-muted);}
 @media print {
   @page { margin: 15mm 15mm 20mm; size: A4; }
 
+  html, body {
+    background: #fff !important;
+    background-color: #fff !important;
+  }
+
+  /* Hide all app content during print — everything except the print frame */
+  body.printing-active > *:not(#print-frame) { display: none !important; }
+  body.printing-active #print-frame { display: block !important; }
+
   /* Force light theme for print */
   body, body * {
     -webkit-print-color-adjust: exact !important;
@@ -322,10 +331,6 @@ textarea::placeholder{color:var(--text-muted);}
   #print-frame .rpt-auth-item.soft { background-color: #fffbeb !important; }
   #print-frame .rpt-hop,
   #print-frame .rpt-auth-item { background-color: #fff !important; }
-
-  /* Hide everything except the print frame */
-  body > *:not(#print-frame) { display: none !important; }
-  #print-frame { display: block !important; }
 
   /* Print frame base styles — light theme */
   #print-frame {
@@ -2778,8 +2783,16 @@ function generateReport(){
   html+=`<div class="rpt-footer">Mail Flow Analyzer &nbsp;·&nbsp; ${now} &nbsp;·&nbsp; Page <span class="pageNumber"></span></div>`;
 
   document.getElementById('print-frame').innerHTML=html;
+  document.getElementById('print-frame').style.display='block';
+  document.body.classList.add('printing-active');
   closeReportModal();
-  setTimeout(()=>window.print(),100);
+  setTimeout(()=>{
+    window.print();
+    setTimeout(()=>{
+      document.getElementById('print-frame').style.display='none';
+      document.body.classList.remove('printing-active');
+    },500);
+  },100);
 }
 
 function rptAuthBadge(label,val){
