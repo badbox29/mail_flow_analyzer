@@ -1361,8 +1361,10 @@ function decodeHeaders(){
   const returnPath=getFirst(hdrs,'return-path');
 
   // ── RECIPIENT CHANGE DETECTION ────────────────────────────────────────────
-  // Collect all envelope recipients seen across Received headers, Delivered-To,
-  // X-Forwarded-To, and X-Original-To, then compare against the To: header.
+  // Received headers come in newest-first order in the raw header block.
+  // The for<> clause in the LAST Received header (chronologically earliest) is
+  // the original envelope recipient. The for<> in the FIRST Received header
+  // (chronologically latest / closest to delivery) is the final recipient.
   const toHeaderAddr=(getFirst(hdrs,'to')||'').match(/[\w.+\-]+@[\w.\-]+/i);
   const toHeaderEmail=toHeaderAddr?toHeaderAddr[0].toLowerCase():null;
   const deliveredTo=(getFirst(hdrs,'delivered-to')||'').match(/[\w.+\-]+@[\w.\-]+/i);
@@ -1371,18 +1373,20 @@ function decodeHeaders(){
   const xForwardedToEmail=xForwardedTo?xForwardedTo[0].toLowerCase():null;
   const xOriginalTo=(getFirst(hdrs,'x-original-to')||'').match(/[\w.+\-]+@[\w.\-]+/i);
   const xOriginalToEmail=xOriginalTo?xOriginalTo[0].toLowerCase():null;
-  // Collect all unique envelope recipients from Received "for <>" clauses
-  const envelopeRecipients=[...new Set(
-    getAll(hdrs,'received')
-      .map(v=>{const m=v.match(/for\s+<([^>]+)>/i);return m?m[1].toLowerCase():null;})
-      .filter(Boolean)
-  )];
-  // Build a picture of original vs final recipient
-  const originalRecipient=xOriginalToEmail||toHeaderEmail||null;
-  const finalRecipient=deliveredToEmail||xForwardedToEmail||(envelopeRecipients.length?envelopeRecipients[envelopeRecipients.length-1]:null)||toHeaderEmail;
+  // Collect for<> recipients from Received headers in document order (newest first)
+  const receivedForAddrs=getAll(hdrs,'received')
+    .map(v=>{const m=v.match(/for\s+<([^>]+)>/i);return m?m[1].toLowerCase():null;})
+    .filter(Boolean);
+  // Newest-first order: [0] = latest hop (closest to delivery) = final recipient
+  //                    [last] = earliest hop (sender's first server) = original recipient
+  const envelopeFinal=receivedForAddrs.length?receivedForAddrs[0]:null;
+  const envelopeOriginal=receivedForAddrs.length?receivedForAddrs[receivedForAddrs.length-1]:null;
+  // Build original vs final with explicit header priority
+  const originalRecipient=xOriginalToEmail||toHeaderEmail||envelopeOriginal||null;
+  const finalRecipient=deliveredToEmail||xForwardedToEmail||envelopeFinal||toHeaderEmail||null;
   const recipientChanged=!!(originalRecipient&&finalRecipient&&originalRecipient!==finalRecipient);
-  // Evidence level: direct if we have explicit forwarding headers, correlated otherwise
-  const recipientChangeEvidence=(xForwardedToEmail||xOriginalToEmail)?'direct':'correlated';
+  // Evidence: direct if explicit forwarding headers present, correlated if inferred from envelope
+  const recipientChangeEvidence=(xForwardedToEmail||xOriginalToEmail||deliveredToEmail)?'direct':'correlated';
 
   const receivedVals=getAll(hdrs,'received');
   const rawHops=receivedVals.map(v=>parseReceived(v)).reverse();
