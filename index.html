@@ -256,6 +256,12 @@ textarea::placeholder{color:var(--text-muted);}
 .s-conditional{display:none;padding:12px 14px;background:var(--bg-card2);border-radius:8px;border:1px solid var(--border);margin-top:8px;}
 .s-conditional.visible{display:block;}
 .settings-modal-footer{display:flex;gap:8px;justify-content:flex-end;padding-top:14px;border-top:1px solid var(--border);margin-top:4px;}
+.s-tabs{display:flex;gap:4px;margin-bottom:18px;border-bottom:1px solid var(--border);}
+.s-tab{padding:8px 16px;font-size:13px;font-weight:500;color:var(--text-secondary);background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;font-family:'DM Sans',sans-serif;margin-bottom:-1px;transition:all .15s;}
+.s-tab:hover{color:var(--text-primary);}
+.s-tab.active{color:var(--blue);border-bottom-color:var(--blue);}
+.s-tabpanel{display:none;}
+.s-tabpanel.active{display:block;}
 .s-active-badge{display:inline-flex;align-items:center;gap:4px;background:var(--blue-dim);color:var(--blue);border:1px solid rgba(59,130,246,.25);border-radius:10px;font-size:10px;font-weight:700;padding:2px 7px;margin-left:6px;vertical-align:middle;}
 /* ── TOAST ────────────────────────────────────────────────────────────────── */
 .toast{position:fixed;bottom:44px;left:50%;transform:translateX(-50%) translateY(10px);background:var(--bg-card);border:1px solid var(--green);color:var(--green);border-radius:8px;padding:8px 18px;font-size:13px;font-weight:500;z-index:600;opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;}
@@ -474,8 +480,15 @@ textarea::placeholder{color:var(--text-muted);}
 <div class="settings-overlay" id="settingsOverlay" onclick="if(event.target===this)closeSettingsModal()">
   <div class="settings-modal">
     <h2>⚙ Environment Settings</h2>
-    <p class="s-desc">Configure your mail environment so the tool can recognize internal systems and provide more accurate analysis. All fields are optional and stored locally in your browser.</p>
+    <p class="s-desc">Configure your mail environment so the tool can recognize internal systems and detect impersonation. All fields are optional and stored locally in your browser.</p>
 
+    <div class="s-tabs">
+      <button class="s-tab active" onclick="switchSettingsTab('environment',this)">Environment</button>
+      <button class="s-tab" onclick="switchSettingsTab('security',this)">Security</button>
+    </div>
+
+    <!-- ENVIRONMENT TAB -->
+    <div class="s-tabpanel active" id="s-tab-environment">
     <!-- MAIL SYSTEM -->
     <div class="s-group">
       <div class="s-group-title">Mail System</div>
@@ -586,6 +599,37 @@ textarea::placeholder{color:var(--text-muted);}
         </div>
       </div>
     </div>
+    </div><!-- /environment tab -->
+
+    <!-- SECURITY TAB -->
+    <div class="s-tabpanel" id="s-tab-security">
+      <div class="s-group">
+        <div class="s-group-title">Organization Domains</div>
+        <div class="s-row">
+          <label class="s-label">Internal / Owned Domains</label>
+          <input class="s-input" id="s-internal-domains" placeholder="yourcompany.com, yourcompany.net, corp.yourcompany.com" />
+          <div class="s-hint">Comma-separated list of domains your organization owns and sends from. Used to detect lookalike domains and impersonation. <b>Fill this in for best results.</b></div>
+        </div>
+        <div class="s-row" style="margin-bottom:0;">
+          <label class="s-label">Trusted Sender Domains <span style="font-weight:400;color:var(--text-muted);">(optional)</span></label>
+          <input class="s-input" id="s-trusted-domains" placeholder="knownvendor.com, partner.org, mailjet.com" />
+          <div class="s-hint">Comma-separated list of known-good external domains (partners, vendors, ESPs). These are treated as legitimate and never flagged as lookalikes or spoofs.</div>
+        </div>
+      </div>
+
+      <div class="s-group">
+        <div class="s-group-title">Impersonation Protection</div>
+        <div class="s-row" style="margin-bottom:0;">
+          <label class="s-label">VIP / Executive Names <span style="font-weight:400;color:var(--text-muted);">(optional)</span></label>
+          <input class="s-input" id="s-vip-names" placeholder="Jane Smith, John Doe, CEO, CFO, IT Support, Helpdesk" />
+          <div class="s-hint">Comma-separated names or titles to watch for. If an external sender's display name contains one of these but sends from a domain not in your internal or trusted lists, it will be flagged as potential impersonation.</div>
+        </div>
+      </div>
+
+      <div style="background:var(--blue-dim);border:1px solid rgba(59,130,246,.2);border-radius:8px;padding:10px 14px;font-size:12px;color:var(--text-secondary);line-height:1.5;">
+        ℹ These settings power three Security Signals: <b>lookalike domain</b> detection, <b>domain-in-display-name</b> spoofing, and <b>VIP name</b> spoofing. Each check only runs when its relevant field is filled in.
+      </div>
+    </div><!-- /security tab -->
 
     <div class="settings-modal-footer">
       <button class="btn-secondary" onclick="clearSettings()">Clear All</button>
@@ -1547,7 +1591,84 @@ function analyzeSecuritySignals(hdrs, hops, auth, effectiveAuth, from, to, retur
       values:'Original: '+esc(originalRecipient)+'\nFinal: '+esc(finalRecipient)+'\nEvidence: '+recipientChangeEvidence});
   }
 
+  // ── 8. IMPERSONATION / LOOKALIKE (settings-dependent) ─────────────────────
+  const settings=window._mfaSettings||{};
+  const parseList=str=>(str||'').split(',').map(x=>x.trim().toLowerCase()).filter(Boolean);
+  const internalDomains=parseList(settings.internalDomains);
+  const trustedDomains=parseList(settings.trustedDomains);
+  const vipNames=parseList(settings.vipNames);
+  const allTrustedDomains=[...internalDomains,...trustedDomains];
+  const senderDomainLower=fromDomain.toLowerCase();
+  const senderIsTrusted=allTrustedDomains.some(d=>senderDomainLower===d||senderDomainLower.endsWith('.'+d));
+
+  // 8a. Domain-in-display-name spoofing
+  // If the display name contains one of our internal/trusted domains but the actual
+  // sending domain is NOT trusted, that's impersonation.
+  if(allTrustedDomains.length&&fromDisplay&&!senderIsTrusted){
+    const displayLower=fromDisplay.toLowerCase();
+    const spoofedDomain=allTrustedDomains.find(d=>displayLower.includes(d));
+    if(spoofedDomain){
+      signals.push({id:'display-domain-spoof',icon:'🎭',name:'Display Name Spoofing',level:'critical',
+        summary:'Display name references a trusted domain but sender is external.',
+        detail:'The display name contains <b>'+esc(spoofedDomain)+'</b> (one of your internal or trusted domains), but the message was actually sent from <b>'+esc(fromDomain)+'</b>, which is not in your trusted lists. This is a strong impersonation indicator — an attacker may be using a trusted domain name in the friendly-from field to appear legitimate.',
+        values:'Display name: '+esc(fromDisplay)+'\nActual sender: '+esc(fromEmail)+'\nReferenced domain: '+esc(spoofedDomain)});
+    }
+  }
+
+  // 8b. VIP / Executive name spoofing
+  // If the display name contains a VIP name but the sender is external/untrusted.
+  if(vipNames.length&&fromDisplay&&!senderIsTrusted){
+    const displayLower=fromDisplay.toLowerCase();
+    const matchedVip=vipNames.find(v=>displayLower.includes(v));
+    if(matchedVip){
+      const level=(auth.spf==='fail'||auth.dmarc==='fail')?'critical':'warn';
+      signals.push({id:'vip-spoof',icon:'👔',name:'VIP Name Spoofing',level,
+        summary:'Display name matches a VIP/executive pattern but sender is external.',
+        detail:'The display name contains "<b>'+esc(matchedVip)+'</b>", which matches one of your configured VIP/executive patterns, but the message was sent from <b>'+esc(fromDomain)+'</b> — a domain not in your internal or trusted lists. This is a common business email compromise (BEC) pattern where an attacker impersonates a known executive by name while sending from an external address.'+(level==='critical'?' Authentication also failed, increasing the risk.':''),
+        values:'Display name: '+esc(fromDisplay)+'\nMatched pattern: '+esc(matchedVip)+'\nActual sender: '+esc(fromEmail)});
+    }
+  }
+
+  // 8c. Lookalike / cousin domain
+  // Sender domain is similar-but-not-equal to an internal or trusted domain.
+  if(allTrustedDomains.length&&senderDomainLower&&!senderIsTrusted){
+    let closest=null,closestDist=99;
+    for(const d of allTrustedDomains){
+      const dist=levenshtein(senderDomainLower,d);
+      if(dist<closestDist){closestDist=dist;closest=d;}
+    }
+    // Flag if within edit distance of 1-2, or if it's a homoglyph/substitution trick
+    const rnTrick=closest&&senderDomainLower.replace(/rn/g,'m')===closest;
+    const hyphenTrick=closest&&senderDomainLower.replace(/-/g,'')===closest.replace(/-/g,'')&&senderDomainLower!==closest;
+    const tldTrick=closest&&senderDomainLower.split('.')[0]===closest.split('.')[0]&&senderDomainLower!==closest;
+    if((closestDist>=1&&closestDist<=2)||rnTrick||hyphenTrick||tldTrick){
+      const level=closestDist<=1||rnTrick?'critical':'warn';
+      signals.push({id:'lookalike',icon:'🔍',name:'Lookalike Domain',level,
+        summary:'Sender domain closely resembles a trusted domain.',
+        detail:'The sending domain <b>'+esc(senderDomainLower)+'</b> is suspiciously similar to your trusted domain <b>'+esc(closest)+'</b>'+(rnTrick?' (using an "rn"→"m" character substitution)':hyphenTrick?' (hyphenation difference)':tldTrick?' (different top-level domain)':' (differs by only '+closestDist+' character'+(closestDist>1?'s':'')+')')+'. This is a classic cousin-domain or typosquatting technique used in phishing and BEC attacks. Verify the sender is legitimate before trusting this message.',
+        values:'Sender domain: '+esc(senderDomainLower)+'\nResembles: '+esc(closest)+'\nEdit distance: '+closestDist});
+    }
+  }
+
   return signals;
+}
+
+// Levenshtein edit distance for lookalike domain detection
+function levenshtein(a,b){
+  if(a===b)return 0;
+  const m=a.length,n=b.length;
+  if(!m)return n;if(!n)return m;
+  let prev=Array.from({length:n+1},(_,i)=>i);
+  let cur=new Array(n+1);
+  for(let i=1;i<=m;i++){
+    cur[0]=i;
+    for(let j=1;j<=n;j++){
+      const cost=a[i-1]===b[j-1]?0:1;
+      cur[j]=Math.min(cur[j-1]+1,prev[j]+1,prev[j-1]+cost);
+    }
+    [prev,cur]=[cur,prev];
+  }
+  return prev[n];
 }
 
 function toggleSignal(id){
@@ -2814,6 +2935,9 @@ function saveSettings(){
     inboundHost:document.getElementById('s-inbound-host').value.trim(),
     outboundFilter:document.getElementById('s-outbound-filter').value,
     outboundHost:document.getElementById('s-outbound-host').value.trim(),
+    internalDomains:document.getElementById('s-internal-domains').value.trim(),
+    trustedDomains:document.getElementById('s-trusted-domains').value.trim(),
+    vipNames:document.getElementById('s-vip-names').value.trim(),
   };
   localStorage.setItem(SETTINGS_KEY,JSON.stringify(s));
   applySettings(s);
@@ -2843,6 +2967,9 @@ function populateSettingsForm(s){
   document.getElementById('s-inbound-host').value=s.inboundHost||'';
   document.getElementById('s-outbound-filter').value=s.outboundFilter||'';
   document.getElementById('s-outbound-host').value=s.outboundHost||'';
+  document.getElementById('s-internal-domains').value=s.internalDomains||'';
+  document.getElementById('s-trusted-domains').value=s.trustedDomains||'';
+  document.getElementById('s-vip-names').value=s.vipNames||'';
   onMailSystemChange();
   onFilterChange('inbound');
   onFilterChange('outbound');
@@ -2850,8 +2977,15 @@ function populateSettingsForm(s){
 
 function updateSettingsBadge(s){
   const btn=document.getElementById('settingsBtn');
-  const hasSettings=s&&(s.mailSystem||s.inboundFilter||s.outboundFilter);
+  const hasSettings=s&&(s.mailSystem||s.inboundFilter||s.outboundFilter||s.internalDomains||s.trustedDomains||s.vipNames);
   btn.innerHTML=hasSettings?'⚙ Settings <span class="s-active-badge">●</span>':'⚙ Settings';
+}
+
+function switchSettingsTab(tab,btn){
+  document.querySelectorAll('.s-tab').forEach(t=>t.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.s-tabpanel').forEach(p=>p.classList.remove('active'));
+  document.getElementById('s-tab-'+tab).classList.add('active');
 }
 
 function openSettingsModal(){
