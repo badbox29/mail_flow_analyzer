@@ -3020,7 +3020,10 @@ function switchSettingsTab(tab,btn){
   document.querySelectorAll('.s-tab').forEach(t=>t.classList.remove('active'));
   btn.classList.add('active');
   document.querySelectorAll('.s-tabpanel').forEach(p=>p.classList.remove('active'));
-  document.getElementById('s-tab-'+tab).classList.add('active');
+  const panel=document.getElementById('s-tab-'+tab);
+  panel.classList.add('active');
+  // Grow any textareas now that the panel is visible (scrollHeight is 0 while hidden)
+  panel.querySelectorAll('.s-textarea').forEach(t=>autoGrow(t));
 }
 
 function autoGrow(el){
