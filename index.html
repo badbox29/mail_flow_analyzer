@@ -1537,11 +1537,27 @@ function analyzeSecuritySignals(hdrs, hops, auth, effectiveAuth, from, to, retur
     if(ea.dkim==='pass')return true;               // aligned DKIM
     return false;
   }
+  // Was this message stamped as internal-origin by the user's own Exchange Organization?
+  // A foreign tenant cannot produce a genuine "AuthAs: Internal" from YOUR org, so this
+  // is proof of legitimate internal origin (Azure reports, internal DLs, tenant mail).
+  function _isInternalOrigin(){
+    const rawAll=(hdrs||[]).map(h=>h.name+': '+h.value).join('\n');
+    return /X-MS-Exchange-Organization-AuthAs:\s*Internal/i.test(rawAll)
+      ||/X-MS-Exchange-CrossTenant-AuthAs:\s*Internal/i.test(rawAll)
+      ||/(^|[;\s])DIR:INT($|[;\s])/i.test(rawAll)
+      ||/X-MS-Exchange-Organization-MessageDirectionality:\s*Originating/i.test(rawAll);
+  }
   function evaluatePlatformArtifact(infraDomain){
     if(!_internalDomains.length||!settings.mailSystem)return 'na';   // not configured → no change
     if(!_isInternalDomain(fromDomain))return 'na';                    // From isn't one of ours → normal heuristics
     if(!_matchesConfiguredPlatform(infraDomain))return 'na';          // infra isn't our platform → normal heuristics
-    return _authAuthorizesFrom()?'authorized':'unauthorized';
+    // Authorized if auth aligns-passes OR the message is stamped internal-origin by our org
+    if(_authAuthorizesFrom()||_isInternalOrigin())return 'authorized';
+    // Auth must be evaluated AND failed to call it unauthorized; else it's just not-assessed → authorized-benign
+    const ea=effectiveAuth||{};
+    const isFailVal=v=>v==='fail'||v==='softfail'||v==='hardfail'||v==='permerror';
+    if(isFailVal(ea.spf)||isFailVal(ea.dkim)||isFailVal(ea.dmarc))return 'unauthorized';
+    return 'authorized';
   }
 
   // ── 1. REPLY-TO MISMATCH ─────────────────────────────────────────────────
@@ -1668,28 +1684,47 @@ function analyzeSecuritySignals(hdrs, hops, auth, effectiveAuth, from, to, retur
 
   // ── 5b. INTERNAL DOMAIN SPOOFING ─────────────────────────────────────────
   // Fires when a message claims to be from one of YOUR internal domains, carries
-  // YOUR configured mail platform's infrastructure fingerprint, but fails authentication
-  // aligned to that domain. This is the foreign-tenant spoof case — e.g. another M365
-  // customer sending as your domain. Their infra looks like Microsoft's (because it is),
-  // but they aren't in your SPF and can't DKIM-sign for your domain, so auth fails.
+  // YOUR configured mail platform's infrastructure fingerprint, AND authentication
+  // aligned to that domain was EVALUATED AND EXPLICITLY FAILED — the foreign-tenant
+  // spoof case (e.g. another M365 customer sending as your domain).
+  //
+  // Critical discrimination: a value of "none"/absent/not-evaluated is NOT a failure.
+  // Internal-origin mail (Azure reports, internal DLs, tenant-to-tenant) never crosses
+  // an inbound boundary, so SPF/DKIM/DMARC show "none" — that is expected, not a spoof.
+  // Microsoft stamps such mail as AuthAs: Internal / DIR:INT, which we treat as proof
+  // of legitimate internal origin and never flag.
   if(_internalDomains.length&&settings.mailSystem&&_isInternalDomain(fromDomain)){
     const msgIdDomForSpoof=(msgId.match(/@([\w.\-]+)>/)||[])[1]||'';
     const rpDomForSpoof=rpDomain;
     const infraHit=[msgIdDomForSpoof,rpDomForSpoof].find(d=>d&&_matchesConfiguredPlatform(d));
-    if(infraHit&&!_authAuthorizesFrom()){
-      // Build a specific reason
-      const ea=effectiveAuth||{};
+
+    // Is auth EVALUATED AND FAILED (not merely absent/none)?
+    const ea=effectiveAuth||{};
+    const isFailVal=v=>v==='fail'||v==='softfail'||v==='hardfail'||v==='permerror';
+    const authEvaluatedAndFailed=isFailVal(ea.spf)||isFailVal(ea.dkim)||isFailVal(ea.dmarc);
+
+    // Internal-origin markers stamped by the user's own Exchange Organization.
+    // A foreign tenant cannot produce a genuine "AuthAs: Internal" from YOUR org.
+    const rawAll=hdrs.map(h=>h.name+': '+h.value).join('\n');
+    const orgAuthAsInternal=/X-MS-Exchange-Organization-AuthAs:\s*Internal/i.test(rawAll)
+      ||/X-MS-Exchange-CrossTenant-AuthAs:\s*Internal/i.test(rawAll);
+    const dirInternal=/(^|[;\s])DIR:INT($|[;\s])/i.test(rawAll)
+      ||/X-MS-Exchange-Organization-MessageDirectionality:\s*Originating/i.test(rawAll);
+    const isInternalOrigin=orgAuthAsInternal||dirInternal;
+
+    // Only flag: our-domain + our-platform infra + auth EVALUATED-FAILED + NOT internal-origin
+    if(infraHit&&authEvaluatedAndFailed&&!isInternalOrigin){
       const failBits=[];
-      if(ea.spf&&ea.spf!=='pass')failBits.push('SPF '+ea.spf);
-      if(ea.dkim&&ea.dkim!=='pass'&&ea.dkim!=='present')failBits.push('DKIM '+ea.dkim);
-      if(ea.dmarc&&ea.dmarc!=='pass')failBits.push('DMARC '+ea.dmarc);
-      const failStr=failBits.length?failBits.join(', '):'authentication did not align to the sending domain';
+      if(isFailVal(ea.spf))failBits.push('SPF '+ea.spf);
+      if(isFailVal(ea.dkim))failBits.push('DKIM '+ea.dkim);
+      if(isFailVal(ea.dmarc))failBits.push('DMARC '+ea.dmarc);
+      const failStr=failBits.join(', ');
       signals.push({id:'internal-spoof',icon:'🚩',name:'Internal Domain Spoofing Suspected',level:'critical',
         summary:'A message claims to be from your domain '+esc(fromDomain)+' but is not authorized to send as it.',
-        detail:'This message claims to be from <b>'+esc(fromDomain)+'</b> — one of your configured internal domains — and carries infrastructure fingerprints (<b>'+esc(infraHit)+'</b>) consistent with your mail platform. However, authentication aligned to your domain <b>failed</b> ('+esc(failStr)+'). '
+        detail:'This message claims to be from <b>'+esc(fromDomain)+'</b> — one of your configured internal domains — and carries infrastructure fingerprints (<b>'+esc(infraHit)+'</b>) consistent with your mail platform. However, authentication aligned to your domain was evaluated and <b>failed</b> ('+esc(failStr)+'), and the message was <b>not</b> stamped as internal-origin by your organization. '
           +'This is the signature of a spoof from a foreign tenant of the same platform type — for example, another Microsoft 365 customer sending as your domain. Their servers legitimately look like Microsoft infrastructure, but they are not authorized in your SPF record and cannot produce a valid DKIM signature for your domain, so authentication fails. '
-          +'A legitimate message from your own domain would pass SPF (your on-premises and gateway sending IPs are in your SPF record) or DKIM. Treat this as a likely impersonation of your domain unless you can confirm a legitimate sending source that is missing from your SPF.',
-        values:'From domain: '+esc(fromDomain)+' (internal)\nPlatform fingerprint: '+esc(infraHit)+'\nAuth: '+esc(failStr)});
+          +'A legitimate message from your own domain would either originate internally (stamped AuthAs: Internal) or pass SPF/DKIM. Treat this as a likely impersonation of your domain unless you can confirm a legitimate sending source that is missing from your SPF.',
+        values:'From domain: '+esc(fromDomain)+' (internal)\nPlatform fingerprint: '+esc(infraHit)+'\nAuth (evaluated & failed): '+esc(failStr)+'\nInternal-origin stamp: none'});
     }
   }
 
