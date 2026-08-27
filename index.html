@@ -1715,11 +1715,668 @@ function toggleSignal(id){
   if(chev)chev.classList.toggle('open',open);
 }
 
-function decodeHeaders(){
-  const raw=document.getElementById('headerInput').value.trim();
+// ═══════════════════════════════════════════════════════════════════════════
+// NDR / BOUNCE ANALYSIS ENGINE
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── SMTP ENHANCED STATUS CODE + RESOLVER TOKEN REFERENCE ────────────────────
+const NDR_CODE_REF={
+  // Enhanced status codes (RFC 3463 + Microsoft extensions)
+  '5.0.0':{sev:'permanent',title:'Generic permanent failure',desc:'A general permanent failure with no more specific code. Often a policy or content rejection by the receiving server.'},
+  '5.1.0':{sev:'permanent',title:'Other address status',desc:'A problem with the sender or recipient address that is permanent.'},
+  '5.1.1':{sev:'permanent',title:'Bad destination mailbox address',desc:'The recipient address does not exist at the destination. Verify the address is correct.'},
+  '5.1.10':{sev:'permanent',title:'Recipient not found (RESOLVER.ADR.RecipientNotFound)',desc:'Exchange could not find the recipient by SMTP address lookup. The mailbox does not exist, or the address is not provisioned in the directory. Common causes: a typo, a deleted mailbox, or a mail-enabled object that was removed.'},
+  '5.1.2':{sev:'permanent',title:'Bad destination system address',desc:'The destination system does not exist or cannot accept mail.'},
+  '5.1.3':{sev:'permanent',title:'Bad destination mailbox address syntax',desc:'The recipient address is malformed.'},
+  '5.2.0':{sev:'permanent',title:'Other mailbox status',desc:'A permanent mailbox problem.'},
+  '5.2.1':{sev:'permanent',title:'Mailbox disabled',desc:'The recipient mailbox exists but is disabled or not accepting mail.'},
+  '5.2.2':{sev:'permanent',title:'Mailbox full',desc:'The recipient mailbox is over its storage quota. Usually temporary in practice, but reported as permanent by some systems.'},
+  '5.4.1':{sev:'permanent',title:'No answer from host / relay access denied',desc:'The receiving server refused to relay, or no route to the recipient could be established.'},
+  '5.4.300':{sev:'permanent',title:'Message expired',desc:'Exchange retried delivery over an extended period (typically 24-48 hours) but never succeeded, so it gave up. The underlying cause is usually a persistent temporary failure — a connectivity or target-host problem — that never resolved. Look at the accompanying 4.x.x codes for the root cause.'},
+  '5.7.1':{sev:'permanent',title:'Delivery not authorized / message refused',desc:'The message was rejected for policy reasons — the sender is not permitted to send to this recipient, or a transport rule blocked it.'},
+  '5.7.5':{sev:'permanent',title:'Cryptographic failure',desc:'A required encryption or authentication step failed.'},
+  '5.7.23':{sev:'permanent',title:'SPF validation failed',desc:'The message failed the recipient\'s SPF check — the sending IP is not authorized for the sender domain.'},
+  '5.7.25':{sev:'permanent',title:'Reverse DNS validation failed',desc:'The sending IP does not have valid reverse DNS (PTR), which the recipient requires.'},
+  '5.7.26':{sev:'permanent',title:'Multiple authentication checks failed',desc:'The message failed multiple authentication checks (SPF, DKIM, and/or DMARC).'},
+  '5.7.509':{sev:'permanent',title:'DMARC verification failed (Access denied)',desc:'The sending domain does not pass DMARC verification and the domain publishes a DMARC policy of reject or quarantine. The receiving Microsoft 365 server enforced that policy. To fix: ensure the sending source is included in the domain\'s SPF record and/or signs with DKIM aligned to the From domain.'},
+  '5.7.606':{sev:'permanent',title:'Access denied, banned sending IP',desc:'The sending IP address is banned by the recipient organization.'},
+  '5.7.708':{sev:'permanent',title:'Access denied, banned sender',desc:'The sending IP or domain was blocked due to reputation (Microsoft S3150).'},
+  // Temporary (4.x.x)
+  '4.2.2':{sev:'temporary',title:'Mailbox full (temporary)',desc:'The recipient mailbox is temporarily over quota. Delivery may succeed once space is freed.'},
+  '4.3.1':{sev:'temporary',title:'Insufficient system resources',desc:'The receiving server is temporarily out of resources (disk, memory). Retries usually succeed.'},
+  '4.4.1':{sev:'temporary',title:'No answer from host',desc:'The target host is not responding. Often a temporary network or server-availability problem.'},
+  '4.4.2':{sev:'temporary',title:'Connection dropped (ConnectionReset)',desc:'The connection to the target host was established but then dropped mid-conversation. Common causes: network instability, firewall/IPS interference, a connector timeout, or the remote server resetting the connection. Repeated occurrences point to a persistent connectivity or connector configuration problem.'},
+  '4.4.7':{sev:'temporary',title:'Message expired / queue timeout',desc:'The message sat in the queue too long waiting for delivery conditions to clear.'},
+  '4.4.397':{sev:'temporary',title:'Error communicating with target host',desc:'Exchange could not complete communication with the destination host. This is a Microsoft-specific transient routing error, usually caused by an underlying connection failure (often paired with a 421 4.4.2). Persistent occurrences indicate a connectivity or connector problem between the sending server and the target.'},
+  '4.7.0':{sev:'temporary',title:'Temporary authentication/policy failure',desc:'A temporary security or policy check failure. May clear on retry.'},
+  '4.7.500':{sev:'temporary',title:'Access denied, try again later',desc:'Temanily throttled or rate-limited by the recipient. Retry later.'},
+  '4.4.312':{sev:'temporary',title:'DNS query failed',desc:'The server could not resolve DNS for the target host. Temporary DNS problem.'},
+  '4.4.316':{sev:'temporary',title:'Connection refused',desc:'The target host actively refused the connection attempt.'},
+  // SMTP basic reply codes (first token)
+  '421':{sev:'temporary',title:'Service not available / connection dropped',desc:'The service is unavailable or the connection was closed. Temporary.'},
+  '451':{sev:'temporary',title:'Requested action aborted — local error',desc:'A temporary local error at the receiving server aborted the action.'},
+  '452':{sev:'temporary',title:'Insufficient system storage',desc:'The receiving server is temporarily out of storage.'},
+  '550':{sev:'permanent',title:'Mailbox unavailable / request rejected',desc:'The most common permanent rejection — mailbox not found, blocked, or policy-refused.'},
+  '551':{sev:'permanent',title:'User not local',desc:'The recipient is not local and relaying was refused.'},
+  '552':{sev:'permanent',title:'Storage allocation exceeded',desc:'The message exceeds the recipient\'s storage allocation.'},
+  '553':{sev:'permanent',title:'Mailbox name not allowed',desc:'The recipient address is not allowed or malformed.'},
+  '554':{sev:'permanent',title:'Transaction failed',desc:'A permanent, general rejection — often a content, reputation, or security-policy block by the receiving server.'},
+};
+
+// RESOLVER token reference (Exchange-specific diagnostic tokens)
+const NDR_RESOLVER_REF={
+  'RESOLVER.ADR.RecipientNotFound':'Exchange address resolution could not find the recipient — the mailbox or mail-enabled object does not exist.',
+  'RESOLVER.ADR.ExRecipNotFound':'The recipient could not be found in the Exchange directory.',
+  'RESOLVER.ADR.BadPrimary':'The recipient object has a bad primary SMTP address.',
+  'RESOLVER.ADR.InvalidInSmtp':'The recipient address is invalid in SMTP.',
+  'RESOLVER.RST.AuthRequired':'Authentication is required to send to this recipient.',
+  'RESOLVER.RST.NotAuthorized':'The sender is not authorized to send to this recipient (a delivery restriction is in place).',
+  'RESOLVER.RST.RecipSizeLimit':'The message exceeds the recipient\'s size limit.',
+  'QUEUE.Expired':'The message expired in the delivery queue after repeated retry attempts.',
+};
+
+// Look up a code (enhanced like 5.7.509, or basic like 550) in the reference
+function lookupNdrCode(code){
+  if(NDR_CODE_REF[code])return NDR_CODE_REF[code];
+  // Try to find by enhanced-status prefix family if exact not present
+  return null;
+}
+
+// ── FORMAT DETECTION ────────────────────────────────────────────────────────
+// Returns 'microsoft' | 'sendmail' | 'rfc3464' | null
+function detectNdrFormat(raw){
+  const lower=raw.toLowerCase();
+  // Microsoft: friendly text + "Diagnostic information for administrators"
+  if(/diagnostic information for administrators/i.test(raw)&&
+     /(generating server|remote server returned|delivery has failed)/i.test(raw)){
+    return 'microsoft';
+  }
+  // RFC 3464 structured DSN
+  if(/content-type:\s*message\/delivery-status/i.test(raw)||
+     (/action:\s*failed/i.test(raw)&&/status:\s*\d\.\d\.\d/i.test(raw))){
+    return 'rfc3464';
+  }
+  // Sendmail / Proofpoint human-readable
+  if(/the following addresses had permanent fatal errors/i.test(raw)||
+     /transcript of session follows/i.test(raw)||
+     (/mailer-daemon/i.test(lower)&&/----- /.test(raw))){
+    return 'sendmail';
+  }
+  // Generic Microsoft fallback: undeliverable + failed recipients
+  if(/^\s*undeliverable:/im.test(raw)||/delivery has failed to these recipients/i.test(raw)){
+    return 'microsoft';
+  }
+  return null;
+}
+
+// Is this content an NDR at all?
+function isNdr(raw){
+  return detectNdrFormat(raw)!==null;
+}
+
+// ── CODE CHAIN PARSER ───────────────────────────────────────────────────────
+// Parses a diagnostic string that may contain a chain like:
+//   "550 5.4.300 Message expired -> 451 4.4.397 Error... -> 421 4.4.2 Connection dropped"
+// Returns array of {basic, enhanced, text} newest(leftmost)-first as written.
+function parseCodeChain(str){
+  if(!str)return[];
+  const parts=str.split(/\s*->\s*/);
+  return parts.map(p=>{
+    const basicM=p.match(/\b([45]\d\d)\b/);
+    const enhM=p.match(/\b([45]\.\d{1,3}\.\d{1,3})\b/);
+    // text is what remains after removing codes
+    let text=p;
+    if(enhM)text=text.replace(enhM[0],'');
+    if(basicM)text=text.replace(basicM[0],'');
+    text=text.replace(/^[\s\-:]+/,'').replace(/[\s\-:]+$/,'').trim();
+    return{
+      basic:basicM?basicM[1]:null,
+      enhanced:enhM?enhM[1]:null,
+      text:text||null
+    };
+  });
+}
+
+// ── EXTRACTORS ──────────────────────────────────────────────────────────────
+// Each returns a normalized bounce object.
+
+function extractMicrosoftNdr(raw){
+  const b=makeEmptyBounce('microsoft');
+  // Friendly recipient list + human message
+  // Failed recipients appear both in the top summary and diagnostic section
+  const genServerM=raw.match(/Generating server:\s*(\S+)/i);
+  if(genServerM)b.reportingServer=genServerM[1];
+  const recvServerM=raw.match(/Receiving server:\s*(\S+)/i);
+  if(recvServerM)b.receivingServer=recvServerM[1];
+
+  // Human-readable reason (the friendly sentence under the recipient list)
+  const friendlyMap=[
+    {re:/couldn't be found|email address you entered couldn't be found/i,reason:'The recipient email address could not be found.'},
+    {re:/several attempts to deliver.*unsuccessful|we stopped trying/i,reason:'Delivery was attempted repeatedly and ultimately abandoned. This may be a temporary condition.'},
+    {re:/recipient's email provider rejected it/i,reason:'The recipient\'s email provider rejected the message.'},
+    {re:/mailbox is full|over.*quota/i,reason:'The recipient mailbox is full.'},
+  ];
+  for(const f of friendlyMap){if(f.re.test(raw)){b.friendlyReason=f.reason;break;}}
+
+  // Per-recipient diagnostic lines. Two shapes seen:
+  //   "<addr>\nRemote Server returned '<code chain>'"
+  //   "<timestamp> - Server at <host> returned '<code chain>'"
+  const recips=[];
+  // Match recipient email then the following "returned '...'" within a window
+  const lines=raw.split(/\r?\n/);
+  let currentAddrs=[];
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i].trim();
+    const addrM=line.match(/^([\w.+\-]+@[\w.\-]+)(?:\s*\(([\w.+\-]+@[\w.\-]+)\))?$/);
+    const returnedM=line.match(/(?:Remote Server returned|Server at\s+([\w.\-]+)(?:\s*\(([\d.]+)\))?\s+returned)\s+'([^']+)'/i);
+    const tsM=line.match(/^(\d{1,2}\/\d{1,2}\/\d{4}\s+[\d:]+\s*[AP]?M?)\s*-\s*/i);
+    if(addrM&&!returnedM){
+      currentAddrs.push(addrM[1]);
+    }
+    if(returnedM){
+      const host=returnedM[1]||null;
+      const chain=parseCodeChain(returnedM[3]);
+      const attempt={
+        addr:currentAddrs.length?currentAddrs[currentAddrs.length-1]:null,
+        host:host,
+        timestamp:tsM?tsM[1]:null,
+        chain:chain,
+        raw:returnedM[3]
+      };
+      recips.push(attempt);
+    }
+  }
+  // Deduplicate failed recipients (from the friendly top list)
+  const failedSet=new Set();
+  // Top-of-message recipient list (before "Diagnostic information")
+  const diagIdx=raw.search(/Diagnostic information for administrators/i);
+  const topSection=diagIdx>0?raw.slice(0,diagIdx):raw;
+  const topRecips=topSection.match(/[\w.+\-]+@[\w.\-]+/g)||[];
+  topRecips.forEach(r=>{
+    // skip the MicrosoftExchange / postmaster sender addresses
+    if(!/microsoftexchange|postmaster|mailer-daemon/i.test(r))failedSet.add(r.toLowerCase());
+  });
+  b.failedRecipients=[...failedSet];
+  b.attempts=recips;
+
+  // Primary code = the most severe / final code across attempts
+  b.codeChain=recips.length?recips[0].chain:[];
+  // For expired messages the chain leads with 5.4.300; pick primary enhanced code
+  const allChains=recips.flatMap(r=>r.chain);
+  const permanent=allChains.find(c=>c.enhanced&&c.enhanced.startsWith('5'));
+  const primary=permanent||allChains[0]||null;
+  if(primary){
+    b.smtpCode=primary.basic;
+    b.enhancedStatus=primary.enhanced;
+    b.diagnosticText=primary.text;
+  }
+  // RESOLVER token
+  const resolverM=raw.match(/(RESOLVER\.[A-Za-z.]+|QUEUE\.Expired)/);
+  if(resolverM)b.resolverToken=resolverM[1];
+
+  // Original message headers block
+  b.originalHeaders=extractOriginalHeaders(raw);
+  finalizeBounce(b);
+  return b;
+}
+
+function extractSendmailNdr(raw){
+  const b=makeEmptyBounce('sendmail');
+  // Failed recipient(s)
+  const failBlockM=raw.match(/permanent fatal errors\s*-+\s*([\s\S]*?)(?:-----|Transcript|$)/i);
+  const addrs=new Set();
+  (raw.match(/<([\w.+\-]+@[\w.\-]+)>/g)||[]).forEach(a=>{
+    const clean=a.replace(/[<>]/g,'').toLowerCase();
+    if(!/mailer-daemon|postmaster|microsoftexchange/i.test(clean))addrs.add(clean);
+  });
+  b.failedRecipients=[...addrs];
+  // Reporting server (the daemon host)
+  const daemonM=raw.match(/MAILER-DAEMON@(\S+?)>/i);
+  if(daemonM)b.reportingServer=daemonM[1];
+  // Original received-at
+  const recvAtM=raw.match(/original message was received at\s+([^\n]+?)\s+from\s+(\S+)/i);
+  if(recvAtM){b.receivedAt=recvAtM[1];b.originalFrom=recvAtM[2];}
+  // Rejecting server ("while talking to X")
+  const talkingM=raw.match(/while talking to\s+([\w.\-]+)/i);
+  if(talkingM)b.rejectingServer=talkingM[1].replace(/\.$/,'');
+  // SMTP response — the <<< line or the reason in the address block
+  const respM=raw.match(/<<<\s*(\d{3})[^\n]*/)||raw.match(/reason:\s*(\d{3})[^\n]*/i);
+  const respLine=respM?respM[0].replace(/^<<<\s*/,'').replace(/^reason:\s*/i,''):'';
+  const chain=parseCodeChain(respLine);
+  b.codeChain=chain;
+  if(chain.length){
+    b.smtpCode=chain[0].basic;
+    b.enhancedStatus=chain[0].enhanced;
+    b.diagnosticText=chain[0].text||respLine.replace(/^\d{3}\s*/,'').trim();
+  }
+  // Unwrap any URLDefense-wrapped links in the diagnostic
+  if(b.diagnosticText)b.diagnosticText=unwrapUrlDefense(b.diagnosticText);
+  b.attempts=b.failedRecipients.map(r=>({addr:r,host:b.rejectingServer,timestamp:null,chain:chain,raw:respLine}));
+  b.originalHeaders=extractOriginalHeaders(raw);
+  finalizeBounce(b);
+  return b;
+}
+
+function extractRfc3464Ndr(raw){
+  const b=makeEmptyBounce('rfc3464');
+  const finalRecipM=raw.match(/Final-Recipient:\s*[^;]+;\s*([\w.+\-]+@[\w.\-]+)/i);
+  const origRecipM=raw.match(/Original-Recipient:\s*[^;]+;\s*([\w.+\-]+@[\w.\-]+)/i);
+  const recip=finalRecipM?finalRecipM[1]:(origRecipM?origRecipM[1]:null);
+  if(recip)b.failedRecipients=[recip.toLowerCase()];
+  const actionM=raw.match(/Action:\s*(\w+)/i);
+  b.action=actionM?actionM[1].toLowerCase():null;
+  const statusM=raw.match(/Status:\s*(\d\.\d{1,3}\.\d{1,3})/i);
+  if(statusM)b.enhancedStatus=statusM[1];
+  const diagM=raw.match(/Diagnostic-Code:\s*smtp;\s*([^\n]+)/i);
+  if(diagM){
+    const chain=parseCodeChain(diagM[1]);
+    b.codeChain=chain;
+    if(chain.length){b.smtpCode=chain[0].basic;if(!b.enhancedStatus)b.enhancedStatus=chain[0].enhanced;b.diagnosticText=chain[0].text;}
+  }
+  const reportingM=raw.match(/Reporting-MTA:\s*[^;]+;\s*(\S+)/i);
+  if(reportingM)b.reportingServer=reportingM[1];
+  const remoteM=raw.match(/Remote-MTA:\s*[^;]+;\s*(\S+)/i);
+  if(remoteM)b.rejectingServer=remoteM[1];
+  b.attempts=b.failedRecipients.map(r=>({addr:r,host:b.rejectingServer,timestamp:null,chain:b.codeChain,raw:diagM?diagM[1]:''}));
+  b.originalHeaders=extractOriginalHeaders(raw);
+  finalizeBounce(b);
+  return b;
+}
+
+// Extract the embedded original message headers from an NDR
+function extractOriginalHeaders(raw){
+  // Microsoft: "Original message headers:" ; also handle code-fenced pastes
+  let idx=raw.search(/Original message headers:/i);
+  if(idx<0)idx=raw.search(/------ This is a copy of the message.*headers/i);
+  if(idx<0){
+    // RFC 3464: headers after the message/rfc822-headers part
+    idx=raw.search(/Content-Type:\s*text\/rfc822-headers/i);
+    if(idx>=0)idx=raw.indexOf('\n\n',idx);
+  }
+  if(idx<0)return null;
+  let block=raw.slice(idx);
+  // strip the label line
+  block=block.replace(/^[^\n]*Original message headers:[^\n]*\n/i,'');
+  // strip markdown code fences if the user pasted a fenced NDR
+  block=block.replace(/```/g,'');
+  return block.trim()||null;
+}
+
+// Unwrap Proofpoint URLDefense links to reveal the real URL
+function unwrapUrlDefense(text){
+  return text.replace(/https:\/\/urldefense\.com\/v3\/__([^_]+)__[^\s\]]*/gi,(m,url)=>{
+    try{return decodeURIComponent(url).replace(/\*/g,'/');}catch(e){return url;}
+  });
+}
+
+function makeEmptyBounce(format){
+  return{
+    format,
+    failedRecipients:[],
+    smtpCode:null,
+    enhancedStatus:null,
+    diagnosticText:null,
+    resolverToken:null,
+    reportingServer:null,
+    receivingServer:null,
+    rejectingServer:null,
+    friendlyReason:null,
+    codeChain:[],
+    attempts:[],
+    originalHeaders:null,
+    receivedAt:null,
+    originalFrom:null,
+    action:null,
+    // finalized fields:
+    severity:null,     // 'permanent' | 'temporary' | 'expired'
+    failClass:null,    // 'security' | 'auth-dmarc' | 'recipient-notfound' | 'connection' | 'expired' | 'policy' | 'quota' | 'unknown'
+    classLabel:null,
+  };
+}
+
+// Determine severity and failure class from the parsed codes
+function finalizeBounce(b){
+  const enh=b.enhancedStatus||'';
+  const basic=b.smtpCode||'';
+  const ref=lookupNdrCode(enh)||lookupNdrCode(basic);
+  // Severity
+  if(enh==='5.4.300'){b.severity='expired';}
+  else if(enh.startsWith('5')||basic.startsWith('5')){b.severity='permanent';}
+  else if(enh.startsWith('4')||basic.startsWith('4')){b.severity='temporary';}
+  else if(ref){b.severity=ref.sev;}
+  else b.severity='permanent';
+
+  // Failure classification
+  const allText=((b.diagnosticText||'')+' '+(b.resolverToken||'')+' '+(b.friendlyReason||'')+' '+JSON.stringify(b.codeChain)).toLowerCase();
+  if(enh==='5.7.509'||/dmarc/.test(allText)){b.failClass='auth-dmarc';b.classLabel='DMARC Authentication Failure';}
+  else if(enh==='5.7.23'||enh==='5.7.24'||/\bspf\b/.test(allText)){b.failClass='auth-spf';b.classLabel='SPF Authentication Failure';}
+  else if(enh==='5.1.10'||enh==='5.1.1'||/recipientnotfound|recipient not found|couldn't be found|does not exist/.test(allText)){b.failClass='recipient-notfound';b.classLabel='Recipient Not Found';}
+  else if(enh==='5.4.300'||/message expired|queue\.expired/.test(allText)){b.failClass='expired';b.classLabel='Message Expired After Retries';}
+  else if(enh==='4.4.2'||enh==='4.4.397'||enh==='4.4.1'||/connection (dropped|reset|refused)|communicating with target|target host/.test(allText)){b.failClass='connection';b.classLabel='Connection / Target Host Failure';}
+  else if(/quota|mailbox full|storage/.test(allText)){b.failClass='quota';b.classLabel='Mailbox Full / Over Quota';}
+  else if(enh.startsWith('5.7')||basic==='554'||/security polic|rejected due to|banned|blocked|reputation/.test(allText)){b.failClass='security';b.classLabel='Security / Policy Block';}
+  else if(/not authorized|relay|delivery restrict/.test(allText)){b.failClass='policy';b.classLabel='Delivery Restriction / Relay Denied';}
+  else{b.failClass='unknown';b.classLabel='Delivery Failure';}
+}
+
+// Main entry: parse an NDR from raw text
+function parseNdr(raw){
+  const fmt=detectNdrFormat(raw);
+  if(fmt==='microsoft')return extractMicrosoftNdr(raw);
+  if(fmt==='sendmail')return extractSendmailNdr(raw);
+  if(fmt==='rfc3464')return extractRfc3464Ndr(raw);
+  return null;
+}
+
+// ── SETTINGS-AWARE SERVER LABELING ──────────────────────────────────────────
+// Returns {label, internal} describing whether a hostname is part of the user's environment
+function classifyNdrServer(host){
+  if(!host)return{label:'',internal:false};
+  const s=window._mfaSettings||{};
+  const parseList=str=>(str||'').split(',').map(x=>x.trim().toLowerCase()).filter(Boolean);
+  const onprem=[...parseList(s.hybridHosts),...parseList(s.hybridConnector),...parseList(s.onpremExchangeHosts),...parseList(s.onpremOtherHosts)];
+  const internalDomains=parseList(s.internalDomains);
+  const h=host.toLowerCase();
+  if(onprem.some(x=>h===x||h.endsWith('.'+x)||h.includes(x)))return{label:'your on-premises server',internal:true};
+  if(internalDomains.some(d=>h.endsWith('.'+d)||h.endsWith(d)))return{label:'your environment',internal:true};
+  // recognize known gateways
+  const gw=classifySystem(host);
+  if(gw&&gw.type==='gateway')return{label:gw.name,internal:false};
+  if(/protection\.outlook\.com|prod\.outlook\.com/i.test(h))return{label:'Microsoft 365 / Exchange Online',internal:false};
+  return{label:'',internal:false};
+}
+
+// Is a domain one of the user's internal domains?
+function isInternalDomain(domain){
+  if(!domain)return false;
+  const s=window._mfaSettings||{};
+  const internalDomains=(s.internalDomains||'').split(',').map(x=>x.trim().toLowerCase()).filter(Boolean);
+  const d=domain.toLowerCase();
+  return internalDomains.some(x=>d===x||d.endsWith('.'+x));
+}
+
+// Build settings-aware suggested actions for a bounce
+function bounceSuggestedActions(b){
+  const actions=[];
+  const origDomain=(b.originalFrom||'').split('@')[1]||extractSenderDomainFromHeaders(b.originalHeaders);
+  const senderInternal=isInternalDomain(origDomain);
+  switch(b.failClass){
+    case 'auth-dmarc':
+      if(senderInternal){
+        actions.push('This is a message from your own domain ('+esc(origDomain||'your domain')+') failing the recipient\'s DMARC check — this is your configuration to fix.');
+        actions.push('Verify the sending source (the IP/gateway that sent this) is included in your domain\'s SPF record.');
+        actions.push('Confirm DKIM signing is enabled and aligned to the From domain for this sending path.');
+        actions.push('Check that mail sent through this path (e.g. a relay or ESP) is covered by your SPF/DKIM before it leaves your environment.');
+      } else {
+        actions.push('The sending domain ('+esc(origDomain||'external')+') failed DMARC and the domain publishes a reject/quarantine policy.');
+        actions.push('If you expected this mail, contact the sender — their SPF/DKIM alignment is broken.');
+        actions.push('Do not simply allowlist the sender; a DMARC failure can indicate spoofing.');
+      }
+      break;
+    case 'auth-spf':
+      actions.push('The sending IP is not authorized in the sender domain\'s SPF record.');
+      if(senderInternal)actions.push('Since this is your domain, add the sending source\'s IP to your SPF record.');
+      else actions.push('If expected, ask the sender to correct their SPF record.');
+      break;
+    case 'recipient-notfound':
+      if(isInternalDomain((b.failedRecipients[0]||'').split('@')[1])){
+        actions.push('The failed recipient(s) are in your own environment but could not be resolved — the mailbox likely does not exist or is not provisioned.');
+        actions.push('Verify the address in your directory (Exchange Admin Center / on-prem Exchange).');
+        actions.push('Check for a recently deleted mailbox, an unsynced AD object, or a missing proxy address.');
+      } else {
+        actions.push('The recipient address does not exist at the destination.');
+        actions.push('Verify the spelling of the address with the sender or intended recipient.');
+        actions.push('If the address was correct previously, the recipient mailbox may have been removed.');
+      }
+      break;
+    case 'expired':
+      actions.push('Exchange retried delivery repeatedly over an extended period and gave up — the root cause is a persistent temporary failure (see the code chain below).');
+      actions.push('Look at the connection-level errors (4.4.x) for the underlying problem.');
+      if(b.attempts.some(a=>classifyNdrServer(a.host).internal))actions.push('The failing hops are within your environment — check connector health, certificates, and network connectivity between your internal mail servers.');
+      actions.push('Confirm the target host/connector is reachable and not being blocked by a firewall or IPS.');
+      break;
+    case 'connection':
+      actions.push('The sending server could not maintain a connection to the target host.');
+      if(b.attempts.some(a=>classifyNdrServer(a.host).internal))actions.push('The affected servers are part of your environment — check the send/receive connectors, TLS certificates, and network path between them.');
+      actions.push('Look for firewall, IPS, or load-balancer interference resetting the connection.');
+      actions.push('Verify the target host is online and accepting SMTP on the expected port.');
+      break;
+    case 'security':
+      actions.push('The message was rejected by a security policy at the receiving side.');
+      actions.push('Review the specific policy referenced in the diagnostic (e.g. Mimecast/Proofpoint policy docs).');
+      actions.push('If the mail is legitimate, contact the recipient organization to review their block, or request allowlisting.');
+      actions.push('Check whether the sending IP or domain has a reputation problem (MXToolbox, Spamhaus).');
+      break;
+    case 'quota':
+      actions.push('The recipient mailbox is full.');
+      actions.push('The recipient must free space; the sender can retry later.');
+      break;
+    case 'policy':
+      actions.push('A delivery restriction or relay policy blocked the message.');
+      actions.push('Verify the sender is authorized to send to this recipient, or adjust the transport/relay rule.');
+      break;
+    default:
+      actions.push('Review the SMTP diagnostic code and text below for the specific failure reason.');
+  }
+  return actions;
+}
+
+function extractSenderDomainFromHeaders(headerText){
+  if(!headerText)return '';
+  const m=headerText.match(/^From:.*?[<\s]([\w.+\-]+@([\w.\-]+))/im);
+  return m?m[2].toLowerCase():'';
+}
+
+// ── RENDER BOUNCE ANALYSIS ──────────────────────────────────────────────────
+function renderBounceAnalysis(raw){
+  const b=parseNdr(raw);
+  if(!b){
+    document.getElementById('results').innerHTML='<div class="error-box">⚠ This looks like a bounce message, but it could not be parsed.</div>';
+    return;
+  }
+  window._lastRaw=raw;
+
+  const sevMeta={
+    permanent:{icon:'🚫',color:'var(--red)',dim:'var(--red-dim)',border:'rgba(239,68,68,.4)',label:'Permanent Failure',blurb:'This message was permanently rejected and will not be delivered without intervention.'},
+    temporary:{icon:'⏳',color:'var(--orange)',dim:'var(--orange-dim)',border:'rgba(245,158,11,.4)',label:'Temporary Failure',blurb:'This was a temporary failure. The sending server may retry automatically.'},
+    expired:{icon:'⌛',color:'var(--red)',dim:'var(--red-dim)',border:'rgba(239,68,68,.4)',label:'Expired After Retries',blurb:'Delivery was retried repeatedly over an extended period, then abandoned. The root cause is a persistent temporary failure.'},
+  };
+  const sm=sevMeta[b.severity]||sevMeta.permanent;
+
+  let html='';
+
+  // Header banner
+  html+=`<div class="card" style="border-color:${sm.border};">
+    <div class="card-hd">
+      <div class="card-icon" style="background:${sm.dim};">${sm.icon}</div>
+      <div style="flex:1;"><div class="card-title">Bounce / NDR Analysis</div><div class="card-desc">Non-delivery report — ${b.format==='microsoft'?'Microsoft 365 / Exchange':b.format==='sendmail'?'Sendmail / Proofpoint':'RFC 3464 (structured DSN)'} format</div></div>
+      <span class="badge" style="background:${sm.dim};color:${sm.color};font-size:12px;border:1px solid ${sm.border};">${sm.label}</span>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <div style="background:${sm.dim};border:1px solid ${sm.border};border-radius:8px;padding:12px 16px;">
+        <div style="font-size:14px;font-weight:600;color:${sm.color};margin-bottom:4px;">${esc(b.classLabel)}</div>
+        <div style="font-size:13px;color:var(--text-secondary);line-height:1.6;">${esc(b.friendlyReason||sm.blurb)}</div>
+      </div>
+
+      <div class="hop-detail-grid">
+        ${b.failedRecipients.length?`<div class="hd-item" style="grid-column:1/-1;"><div class="hd-lbl">Failed Recipient${b.failedRecipients.length>1?'s ('+b.failedRecipients.length+')':''}</div><div class="hd-val">${b.failedRecipients.map(r=>esc(r)).join('<br>')}</div></div>`:''}
+        ${b.smtpCode||b.enhancedStatus?`<div class="hd-item"><div class="hd-lbl">SMTP Status</div><div class="hd-val">${esc([b.smtpCode,b.enhancedStatus].filter(Boolean).join('  '))}</div></div>`:''}
+        ${b.resolverToken?`<div class="hd-item"><div class="hd-lbl">Diagnostic Token</div><div class="hd-val">${esc(b.resolverToken)}</div></div>`:''}
+        ${b.reportingServer?`<div class="hd-item"><div class="hd-lbl">Reporting Server</div><div class="hd-val">${esc(b.reportingServer)}${ndrServerTag(b.reportingServer)}</div></div>`:''}
+        ${b.rejectingServer?`<div class="hd-item"><div class="hd-lbl">Rejecting Server</div><div class="hd-val">${esc(b.rejectingServer)}${ndrServerTag(b.rejectingServer)}</div></div>`:''}
+        ${b.originalFrom?`<div class="hd-item"><div class="hd-lbl">Original Sender Host</div><div class="hd-val">${esc(b.originalFrom)}</div></div>`:''}
+      </div>
+
+      ${b.diagnosticText?`<div style="background:var(--bg-input);border-radius:8px;padding:10px 14px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-secondary);line-height:1.5;word-break:break-word;">${esc(unwrapUrlDefense(b.diagnosticText))}</div>`:''}
+    </div>
+  </div>`;
+
+  // Code chain explanation
+  const allChain=b.attempts.length?b.attempts[0].chain:b.codeChain;
+  if(allChain&&allChain.length){
+    html+=renderCodeChain(allChain, b);
+  }
+
+  // Attempt history (when multiple attempts / timestamps present)
+  if(b.attempts.length>1||b.attempts.some(a=>a.timestamp)){
+    html+=renderAttemptHistory(b);
+  }
+
+  // Suggested actions (settings-aware)
+  const actions=bounceSuggestedActions(b);
+  html+=`<div class="card">
+    <div class="card-hd"><div class="card-icon ci-blue">🛠</div><div><div class="card-title">Suggested Actions</div><div class="card-desc">Tailored to this failure${(window._mfaSettings&&(window._mfaSettings.internalDomains||window._mfaSettings.onpremExchangeHosts))?' and your environment':''}</div></div></div>
+    <div style="display:flex;flex-direction:column;gap:8px;">
+      ${actions.map(a=>`<div style="display:flex;gap:8px;font-size:13px;color:var(--text-secondary);line-height:1.5;"><span style="color:var(--blue);flex-shrink:0;font-weight:700;">→</span><span>${a}</span></div>`).join('')}
+    </div>
+  </div>`;
+
+  // Code reference (collapsible)
+  html+=renderNdrCodeReference(b);
+
+  // Embedded original message analysis
+  if(b.originalHeaders){
+    const embeddedHtml=decodeHeaders(b.originalHeaders,true);
+    html+=`<div style="margin:20px 0 10px;display:flex;align-items:center;gap:10px;">
+      <div style="flex:1;height:1px;background:var(--border);"></div>
+      <div style="font-size:12px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.8px;">Analysis of the Original Message</div>
+      <div style="flex:1;height:1px;background:var(--border);"></div>
+    </div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px;text-align:center;">The message that bounced, analyzed in full below</div>
+    ${embeddedHtml||'<div class="info-box"><span>ℹ</span><span>The original message headers were included but could not be fully analyzed.</span></div>'}`;
+  } else {
+    html+=`<div class="info-box" style="margin-top:14px;"><span>ℹ</span><span>This bounce did not include the original message headers, so the message\'s delivery path cannot be analyzed.</span></div>`;
+  }
+
+  document.getElementById('printBtn').style.display='flex';
+  const res=document.getElementById('results');
+  res.innerHTML=html;
+  res.scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+// Small inline tag showing internal/external classification of a server
+function ndrServerTag(host){
+  const c=classifyNdrServer(host);
+  if(c.internal)return ' <span style="font-size:10px;font-weight:700;padding:1px 6px;border-radius:8px;background:var(--cyan-dim);color:var(--cyan);margin-left:6px;">'+esc(c.label)+'</span>';
+  if(c.label)return ' <span style="font-size:10px;font-weight:700;padding:1px 6px;border-radius:8px;background:var(--purple-dim);color:var(--purple);margin-left:6px;">'+esc(c.label)+'</span>';
+  return '';
+}
+
+// Render the code chain as a causal sequence
+function renderCodeChain(chain, b){
+  // chain is written newest/outermost first; reverse for root-cause-first reading
+  const reversed=[...chain].reverse();
+  const rows=reversed.map((c,i)=>{
+    const code=c.enhanced||c.basic;
+    const ref=lookupNdrCode(c.enhanced)||lookupNdrCode(c.basic);
+    const isRoot=i===0&&reversed.length>1;
+    const isFinal=i===reversed.length-1;
+    const sevColor=(code&&code.startsWith('5'))?'var(--red)':(code&&code.startsWith('4'))?'var(--orange)':'var(--text-muted)';
+    return `<div style="display:flex;gap:10px;align-items:flex-start;padding:10px 0;${i<reversed.length-1?'border-bottom:1px solid var(--border);':''}">
+      <div style="flex-shrink:0;width:74px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:${sevColor};">${esc([c.basic,c.enhanced].filter(Boolean).join(' '))}</div>
+      <div style="flex:1;">
+        <div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:2px;">${ref?esc(ref.title):esc(c.text||'Unknown code')}${isRoot?' <span style="font-size:10px;font-weight:700;color:var(--orange);">ROOT CAUSE</span>':''}${isFinal&&reversed.length>1?' <span style="font-size:10px;font-weight:700;color:var(--red);">FINAL OUTCOME</span>':''}</div>
+        ${ref?`<div style="font-size:12px;color:var(--text-secondary);line-height:1.5;">${esc(ref.desc)}</div>`:(c.text?`<div style="font-size:12px;color:var(--text-muted);">${esc(c.text)}</div>`:'')}
+      </div>
+    </div>`;
+  }).join('');
+
+  const chainNote=reversed.length>1
+    ? 'This failure involved a chain of errors. Read top-to-bottom: the root cause led to repeated failures, ending in the final outcome.'
+    : 'The specific code returned by the receiving server.';
+
+  return `<div class="card">
+    <div class="card-hd"><div class="card-icon ci-orange">🔎</div><div><div class="card-title">What the Codes Mean</div><div class="card-desc">${chainNote}</div></div></div>
+    <div>${rows}</div>
+  </div>`;
+}
+
+// Render timestamped attempt history
+function renderAttemptHistory(b){
+  const rows=b.attempts.filter(a=>a.timestamp||a.host).map(a=>{
+    const codes=a.chain.map(c=>[c.basic,c.enhanced].filter(Boolean).join(' ')).join(' → ');
+    const srv=classifyNdrServer(a.host);
+    return `<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--border);">
+      <div style="flex-shrink:0;font-size:11px;color:var(--text-muted);width:130px;">${a.timestamp?esc(a.timestamp):'—'}</div>
+      <div style="flex:1;">
+        ${a.host?`<div style="font-size:12px;font-weight:600;color:var(--text-primary);">${esc(a.host)}${srv.internal?' <span style="font-size:9px;color:var(--cyan);">('+esc(srv.label)+')</span>':''}</div>`:''}
+        <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-secondary);margin-top:2px;">${esc(codes)}</div>
+      </div>
+    </div>`;
+  }).join('');
+  return `<div class="card">
+    <div class="card-hd"><div class="card-icon ci-purple">🕐</div><div><div class="card-title">Delivery Attempt History</div><div class="card-desc">Each retry recorded before the message ${b.severity==='expired'?'expired':'failed'}</div></div></div>
+    <div>${rows}</div>
+  </div>`;
+}
+
+// Render collapsible NDR code reference
+function renderNdrCodeReference(b){
+  // Show codes relevant to this bounce plus a general table
+  const relevantCodes=new Set();
+  (b.codeChain||[]).forEach(c=>{if(c.enhanced)relevantCodes.add(c.enhanced);if(c.basic)relevantCodes.add(c.basic);});
+  b.attempts.forEach(a=>a.chain.forEach(c=>{if(c.enhanced)relevantCodes.add(c.enhanced);if(c.basic)relevantCodes.add(c.basic);}));
+
+  const refId='ndrref-'+Math.random().toString(36).slice(2);
+  const chevId='ndrchev-'+Math.random().toString(36).slice(2);
+
+  // Build reference rows: relevant first, then a curated common set
+  const commonCodes=['5.1.10','5.7.509','5.7.1','5.4.300','4.4.2','4.4.397','421','451','550','554'];
+  const shown=[...new Set([...relevantCodes,...commonCodes])].filter(c=>NDR_CODE_REF[c]);
+  const rows=shown.map(code=>{
+    const ref=NDR_CODE_REF[code];
+    const isRelevant=relevantCodes.has(code);
+    const sevColor=ref.sev==='temporary'?'var(--orange)':'var(--red)';
+    return `<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);${isRelevant?'background:var(--blue-dim);margin:0 -8px;padding-left:8px;padding-right:8px;border-radius:4px;':''}">
+      <div style="flex-shrink:0;width:70px;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:${sevColor};">${esc(code)}</div>
+      <div style="flex:1;">
+        <div style="font-size:12px;font-weight:600;color:var(--text-primary);">${esc(ref.title)}${isRelevant?' <span style="font-size:9px;color:var(--blue);font-weight:700;">THIS BOUNCE</span>':''}</div>
+        <div style="font-size:11px;color:var(--text-muted);line-height:1.4;margin-top:1px;">${esc(ref.desc)}</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Resolver token reference if present
+  let resolverRows='';
+  if(b.resolverToken&&NDR_RESOLVER_REF[b.resolverToken]){
+    resolverRows=`<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">
+      <div style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Exchange Diagnostic Token</div>
+      <div style="display:flex;gap:10px;">
+        <div style="flex-shrink:0;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:var(--cyan);">${esc(b.resolverToken)}</div>
+        <div style="font-size:11px;color:var(--text-secondary);line-height:1.4;">${esc(NDR_RESOLVER_REF[b.resolverToken])}</div>
+      </div>
+    </div>`;
+  }
+
+  return `<div class="card" style="padding:0;overflow:hidden;">
+    <div onclick="document.getElementById('${refId}').classList.toggle('open');document.getElementById('${chevId}').classList.toggle('open')"
+         style="display:flex;align-items:center;gap:10px;padding:14px 18px;cursor:pointer;">
+      <div class="card-icon ci-cyan">📖</div>
+      <div style="flex:1;"><div class="card-title">SMTP / NDR Code Reference</div><div class="card-desc">Codes relevant to this bounce, plus common codes — click to expand</div></div>
+      <span id="${chevId}" class="xhdr-chev" style="color:var(--text-muted);">▼</span>
+    </div>
+    <div id="${refId}" class="xhdr-body" style="padding:0 18px 16px;">
+      ${rows}
+      ${resolverRows}
+    </div>
+  </div>`;
+}
+
+function decodeHeaders(rawOverride, returnHtml){
+  const raw=(typeof rawOverride==='string'&&rawOverride)?rawOverride.trim():document.getElementById('headerInput').value.trim();
   if(!raw){return;}
+
+  // ── NDR / BOUNCE DETECTION ────────────────────────────────────────────────
+  // If this looks like a bounce/NDR, render the bounce analysis view instead.
+  // (Skip when called in returnHtml mode for embedded original-header analysis.)
+  if(!returnHtml&&isNdr(raw)){
+    renderBounceAnalysis(raw);
+    return;
+  }
+
   const hdrs=parseHeaders(raw);
   if(!hdrs.length){
+    if(returnHtml)return '<div class="error-box">⚠ Could not parse the original message headers embedded in this bounce.</div>';
     document.getElementById('results').innerHTML='<div class="error-box">⚠ Could not parse headers. Paste the full raw email headers.</div>';
     return;
   }
@@ -2573,6 +3230,8 @@ function decodeHeaders(){
     secSignals,
   };
   document.getElementById('printBtn').style.display='flex';
+
+  if(returnHtml)return html;
 
   const res=document.getElementById('results');
   res.innerHTML=html;
