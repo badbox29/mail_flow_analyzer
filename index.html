@@ -1871,7 +1871,11 @@ function extractMicrosoftNdr(raw){
     const returnedM=line.match(/(?:Remote Server returned|Server at\s+([\w.\-]+)(?:\s*\(([\d.]+)\))?\s+returned)\s+'([^']+)'/i);
     const tsM=line.match(/^(\d{1,2}\/\d{1,2}\/\d{4}\s+[\d:]+\s*[AP]?M?)\s*-\s*/i);
     if(addrM&&!returnedM){
-      currentAddrs.push(addrM[1]);
+      const localPart=addrM[1].split('@')[0];
+      // skip message-id-like locals (very long or GUID/hex)
+      if(localPart.length<=40&&!/^[0-9a-f]{16,}/.test(localPart)){
+        currentAddrs.push(addrM[1]);
+      }
     }
     if(returnedM){
       const host=returnedM[1]||null;
@@ -1891,10 +1895,16 @@ function extractMicrosoftNdr(raw){
   // Top-of-message recipient list (before "Diagnostic information")
   const diagIdx=raw.search(/Diagnostic information for administrators/i);
   const topSection=diagIdx>0?raw.slice(0,diagIdx):raw;
-  const topRecips=topSection.match(/[\w.+\-]+@[\w.\-]+/g)||[];
+  // Exclude the message-id line so we don't scoop an id that looks like an address
+  const topClean=topSection.replace(/on message id\s*<[^>]+>/ig,'').replace(/message[- ]?id:\s*<[^>]+>/ig,'');
+  const topRecips=topClean.match(/[\w.+\-]+@[\w.\-]+/g)||[];
   topRecips.forEach(r=>{
-    // skip the MicrosoftExchange / postmaster sender addresses
-    if(!/microsoftexchange|postmaster|mailer-daemon/i.test(r))failedSet.add(r.toLowerCase());
+    const rl=r.toLowerCase();
+    // skip system senders and anything that looks like a message-id (very long local part / GUID-like)
+    if(/microsoftexchange|postmaster|mailer-daemon/i.test(rl))return;
+    if(rl.split('@')[0].length>40)return; // message-ids have very long local parts
+    if(/^[0-9a-f]{16,}/.test(rl.split('@')[0]))return; // hex/GUID-like local part
+    failedSet.add(rl);
   });
   b.failedRecipients=[...failedSet];
   b.attempts=recips;
@@ -2009,6 +2019,16 @@ function unwrapUrlDefense(text){
   });
 }
 
+// Escape text then linkify any http(s) URLs as clickable new-tab links
+function linkifyDiagnostic(text){
+  if(!text)return '';
+  const escaped=esc(text);
+  // esc() has already encoded &, <, >, so URLs are safe to match on the escaped string
+  return escaped.replace(/(https?:\/\/[^\s\]]+)/gi,(m)=>{
+    return '<a href="'+m+'" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:underline;word-break:break-all;">'+m+'</a>';
+  });
+}
+
 function makeEmptyBounce(format){
   return{
     format,
@@ -2029,8 +2049,9 @@ function makeEmptyBounce(format){
     action:null,
     // finalized fields:
     severity:null,     // 'permanent' | 'temporary' | 'expired'
-    failClass:null,    // 'security' | 'auth-dmarc' | 'recipient-notfound' | 'connection' | 'expired' | 'policy' | 'quota' | 'unknown'
+    failClass:null,    // 'security' | 'auth-dmarc' | 'recipient-notfound' | 'connection' | 'expired' | 'policy' | 'quota' | 'mail-loop' | 'unknown'
     classLabel:null,
+    contextNote:null,  // overrides/reframes generic code meaning when diagnostic names a specific cause
   };
 }
 
@@ -2048,13 +2069,19 @@ function finalizeBounce(b){
 
   // Failure classification
   const allText=((b.diagnosticText||'')+' '+(b.resolverToken||'')+' '+(b.friendlyReason||'')+' '+JSON.stringify(b.codeChain)).toLowerCase();
-  if(enh==='5.7.509'||/dmarc/.test(allText)){b.failClass='auth-dmarc';b.classLabel='DMARC Authentication Failure';}
-  else if(enh==='5.7.23'||enh==='5.7.24'||/\bspf\b/.test(allText)){b.failClass='auth-spf';b.classLabel='SPF Authentication Failure';}
-  else if(enh==='5.1.10'||enh==='5.1.1'||/recipientnotfound|recipient not found|couldn't be found|does not exist/.test(allText)){b.failClass='recipient-notfound';b.classLabel='Recipient Not Found';}
-  else if(enh==='5.4.300'||/message expired|queue\.expired/.test(allText)){b.failClass='expired';b.classLabel='Message Expired After Retries';}
-  else if(enh==='4.4.2'||enh==='4.4.397'||enh==='4.4.1'||/connection (dropped|reset|refused)|communicating with target|target host/.test(allText)){b.failClass='connection';b.classLabel='Connection / Target Host Failure';}
+  // Contextual override: the server's own diagnostic text is more specific than the generic code.
+  // Detect these named causes first and let them drive classification + a context note.
+  if(/hop count exceeded|mail loop|loop detected|too many hops/.test(allText)){
+    b.failClass='mail-loop';b.classLabel='Mail Loop / Hop Count Exceeded';
+    b.contextNote='The receiving server reported a mail loop (hop count exceeded). Although the SMTP code often maps to a generic policy failure, the real cause here is a routing loop — the message was passed back and forth between servers until the maximum hop count was reached.';
+  }
+  else if(b.enhancedStatus==='5.7.509'||/dmarc/.test(allText)){b.failClass='auth-dmarc';b.classLabel='DMARC Authentication Failure';}
+  else if(b.enhancedStatus==='5.7.23'||b.enhancedStatus==='5.7.24'||/\bspf\b/.test(allText)){b.failClass='auth-spf';b.classLabel='SPF Authentication Failure';}
+  else if(b.enhancedStatus==='5.1.10'||b.enhancedStatus==='5.1.1'||/recipientnotfound|recipient not found|couldn't be found|does not exist/.test(allText)){b.failClass='recipient-notfound';b.classLabel='Recipient Not Found';}
+  else if(b.enhancedStatus==='5.4.300'||/message expired|queue\.expired/.test(allText)){b.failClass='expired';b.classLabel='Message Expired After Retries';}
+  else if(b.enhancedStatus==='4.4.2'||b.enhancedStatus==='4.4.397'||b.enhancedStatus==='4.4.1'||/connection (dropped|reset|refused)|communicating with target|target host/.test(allText)){b.failClass='connection';b.classLabel='Connection / Target Host Failure';}
   else if(/quota|mailbox full|storage/.test(allText)){b.failClass='quota';b.classLabel='Mailbox Full / Over Quota';}
-  else if(enh.startsWith('5.7')||basic==='554'||/security polic|rejected due to|banned|blocked|reputation/.test(allText)){b.failClass='security';b.classLabel='Security / Policy Block';}
+  else if((b.enhancedStatus||'').startsWith('5.7')||b.smtpCode==='554'||/security polic|rejected due to|banned|blocked|reputation/.test(allText)){b.failClass='security';b.classLabel='Security / Policy Block';}
   else if(/not authorized|relay|delivery restrict/.test(allText)){b.failClass='policy';b.classLabel='Delivery Restriction / Relay Denied';}
   else{b.failClass='unknown';b.classLabel='Delivery Failure';}
 }
@@ -2101,6 +2128,22 @@ function bounceSuggestedActions(b){
   const origDomain=(b.originalFrom||'').split('@')[1]||extractSenderDomainFromHeaders(b.originalHeaders);
   const senderInternal=isInternalDomain(origDomain);
   switch(b.failClass){
+    case 'mail-loop':{
+      actions.push('The message looped between mail servers until the maximum hop count was reached. The goal is to find where the routing sends the message in a circle.');
+      const isHybrid=(window._mfaSettings||{}).mailSystem==='hybrid';
+      const loopInternal=b.attempts.some(a=>classifyNdrServer(a.host).internal)||/\.mail\.onmicrosoft\.com|prod\.outlook\.com/i.test((b.diagnosticText||'')+JSON.stringify(b.failedRecipients));
+      if(isHybrid){
+        actions.push('In your Exchange Online Hybrid environment, a common cause is a cloud mailbox that is unreachable, so Exchange Online routes the message back on-premises, which then routes it back to the cloud — repeating until the loop is detected. Check these three things:');
+        actions.push('1. Exchange Online license status — confirm the target mailbox is properly licensed. An unlicensed or unprovisioned cloud mailbox causes the cloud to bounce mail back on-prem.');
+        actions.push('2. On-premises remote routing address — verify the remote routing address (the @yourtenant.mail.onmicrosoft.com targetAddress on the remote mailbox object) is correct and points to a valid cloud mailbox.');
+        actions.push('3. Mailbox identity consistency — confirm the mailbox GUID/identity matches between on-premises and Exchange Online, so both environments agree on where the mailbox actually lives.');
+      } else {
+        actions.push('Check the routing configuration on the servers involved — a forwarding rule, connector, or alias is likely sending the message in a circle.');
+        actions.push('Look for a mailbox or distribution group that forwards to an address that ultimately points back to itself.');
+        if(loopInternal)actions.push('The loop appears to involve your own mail infrastructure — review transport/connector configuration between the affected servers.');
+      }
+      break;
+    }
     case 'auth-dmarc':
       if(senderInternal){
         actions.push('This is a message from your own domain ('+esc(origDomain||'your domain')+') failing the recipient\'s DMARC check — this is your configuration to fix.');
@@ -2207,7 +2250,7 @@ function renderBounceAnalysis(raw){
         ${b.originalFrom?`<div class="hd-item"><div class="hd-lbl">Original Sender Host</div><div class="hd-val">${esc(b.originalFrom)}</div></div>`:''}
       </div>
 
-      ${b.diagnosticText?`<div style="background:var(--bg-input);border-radius:8px;padding:10px 14px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-secondary);line-height:1.5;word-break:break-word;">${esc(unwrapUrlDefense(b.diagnosticText))}</div>`:''}
+      ${b.diagnosticText?`<div style="background:var(--bg-input);border-radius:8px;padding:10px 14px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-secondary);line-height:1.5;word-break:break-word;">${linkifyDiagnostic(unwrapUrlDefense(b.diagnosticText))}</div>`:''}
     </div>
   </div>`;
 
@@ -2249,6 +2292,7 @@ function renderBounceAnalysis(raw){
   }
 
   document.getElementById('printBtn').style.display='flex';
+  window._bounceData=b;
   const res=document.getElementById('results');
   res.innerHTML=html;
   res.scrollIntoView({behavior:'smooth',block:'start'});
@@ -2285,8 +2329,13 @@ function renderCodeChain(chain, b){
     ? 'This failure involved a chain of errors. Read top-to-bottom: the root cause led to repeated failures, ending in the final outcome.'
     : 'The specific code returned by the receiving server.';
 
+  const contextBanner=b.contextNote
+    ? `<div style="background:var(--orange-dim);border:1px solid rgba(245,158,11,.35);border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:var(--text-secondary);line-height:1.6;"><b style="color:var(--orange);">Context:</b> ${esc(b.contextNote)}</div>`
+    : '';
+
   return `<div class="card">
     <div class="card-hd"><div class="card-icon ci-orange">🔎</div><div><div class="card-title">What the Codes Mean</div><div class="card-desc">${chainNote}</div></div></div>
+    ${contextBanner}
     <div>${rows}</div>
   </div>`;
 }
@@ -3230,6 +3279,7 @@ function decodeHeaders(rawOverride, returnHtml){
     secSignals,
   };
   document.getElementById('printBtn').style.display='flex';
+  if(!returnHtml)window._bounceData=null;
 
   if(returnHtml)return html;
 
@@ -3420,16 +3470,60 @@ function getSections(type){
 function generateReport(){
   const sections=getSections(_selectedReportType);
   const d=window._reportData;
-  if(!d){closeReportModal();return;}
+  const bounce=window._bounceData;
+  if(!d&&!bounce){closeReportModal();return;}
 
   const typeLabels={executive:'Executive Summary',full:'Full Detail',security:'Security Analysis',journey:'Mail Journey',custom:'Custom Report'};
   const now=new Date().toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'});
 
+  // ── BOUNCE / NDR SUMMARY (when analyzing a bounce) ────────────────────────
+  let bounceHtml='';
+  if(bounce){
+    const sevWord={permanent:'Permanent Failure',temporary:'Temporary Failure',expired:'Expired After Retries'}[bounce.severity]||'Delivery Failure';
+    const sevColor=bounce.severity==='temporary'?'#92400e':'#991b1b';
+    const sevBg=bounce.severity==='temporary'?'#fffbeb':'#fef2f2';
+    const sevBorder=bounce.severity==='temporary'?'#fde68a':'#fecaca';
+    bounceHtml=`<div class="rpt-section">
+      <div class="rpt-section-title">Bounce / NDR Analysis</div>
+      <div style="background:${sevBg};border:1px solid ${sevBorder};border-radius:6px;padding:10px 14px;margin-bottom:10px;">
+        <div style="font-size:13px;font-weight:700;color:${sevColor};margin-bottom:2px;">${esc(bounce.classLabel)} — ${sevWord}</div>
+        ${bounce.friendlyReason?`<div style="font-size:11px;color:#374151;line-height:1.5;">${esc(bounce.friendlyReason)}</div>`:''}
+        ${bounce.contextNote?`<div style="font-size:11px;color:#374151;line-height:1.5;margin-top:4px;"><b>Context:</b> ${esc(bounce.contextNote)}</div>`:''}
+      </div>
+      <div class="rpt-grid">
+        ${bounce.failedRecipients.length?`<div class="rpt-item" style="grid-column:1/-1;"><div class="lbl">Failed Recipient${bounce.failedRecipients.length>1?'s':''}</div><div class="val">${bounce.failedRecipients.map(r=>esc(r)).join(', ')}</div></div>`:''}
+        ${bounce.smtpCode||bounce.enhancedStatus?`<div class="rpt-item"><div class="lbl">SMTP Status</div><div class="val">${esc([bounce.smtpCode,bounce.enhancedStatus].filter(Boolean).join('  '))}</div></div>`:''}
+        ${bounce.reportingServer?`<div class="rpt-item"><div class="lbl">Reporting Server</div><div class="val">${esc(bounce.reportingServer)}</div></div>`:''}
+        ${bounce.rejectingServer?`<div class="rpt-item"><div class="lbl">Rejecting Server</div><div class="val">${esc(bounce.rejectingServer)}</div></div>`:''}
+        ${bounce.resolverToken?`<div class="rpt-item"><div class="lbl">Diagnostic Token</div><div class="val mono">${esc(bounce.resolverToken)}</div></div>`:''}
+      </div>
+      ${bounce.diagnosticText?`<div class="rpt-item" style="margin-top:8px;"><div class="lbl">Diagnostic</div><div class="val mono">${esc(unwrapUrlDefense(bounce.diagnosticText))}</div></div>`:''}
+      <div style="margin-top:10px;">
+        <div style="font-size:11px;font-weight:700;color:#5a5a78;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Suggested Actions</div>
+        ${bounceSuggestedActions(bounce).map(a=>`<div style="font-size:11px;color:#374151;line-height:1.5;margin-bottom:3px;">• ${esc(a.replace(/<[^>]+>/g,''))}</div>`).join('')}
+      </div>
+    </div>`;
+  }
+
+  // Bounce-only report (no embedded original message)
+  if(bounce&&!d){
+    let bhtml=`<div class="rpt-header">
+      <h1>Mail Flow Analyzer — Bounce Analysis</h1>
+      <div class="rpt-meta">Generated ${now}${bounce.failedRecipients.length?' &nbsp;·&nbsp; '+esc(bounce.failedRecipients[0]):''}</div>
+    </div>${bounceHtml}
+    <div class="rpt-footer">Mail Flow Analyzer &nbsp;·&nbsp; ${now} &nbsp;·&nbsp; Page <span class="pageNumber"></span></div>`;
+    document.getElementById('print-frame').innerHTML=bhtml;
+    closeReportModal();
+    setTimeout(()=>window.print(),100);
+    return;
+  }
+
   // ── UNCONDITIONAL MESSAGE IDENTITY HEADER — always in every report ─────────
   let html=`<div class="rpt-header">
-    <h1>Mail Flow Analyzer — ${typeLabels[_selectedReportType]||'Report'}</h1>
+    <h1>Mail Flow Analyzer — ${bounce?'Bounce Analysis':(typeLabels[_selectedReportType]||'Report')}</h1>
     <div class="rpt-meta">Generated ${now} &nbsp;·&nbsp; ${esc(d.from)} → ${esc(d.to)}</div>
   </div>
+  ${bounceHtml}
   <div class="rpt-section" style="border:1px solid #d0d0e0;border-radius:8px;padding:12px 14px;margin-bottom:18px;background:#f8f9fc;">
     <div class="rpt-grid" style="margin-bottom:6px;">
       <div class="rpt-item"><div class="lbl">From (Sender)</div><div class="val">${esc(d.from)}</div></div>
@@ -3746,7 +3840,7 @@ function collectSettings(){
 
 function exportSettingsFile(){
   const s=loadSettings();
-  const payload={_app:'Mail Flow Analyzer',_type:'settings',_version:'1.6',...s};
+  const payload={_app:'Mail Flow Analyzer',_type:'settings',_version:'1.7',...s};
   const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a');
@@ -3758,7 +3852,7 @@ function exportSettingsFile(){
 
 function copySettingsJSON(){
   const s=loadSettings();
-  const payload={_app:'Mail Flow Analyzer',_type:'settings',_version:'1.6',...s};
+  const payload={_app:'Mail Flow Analyzer',_type:'settings',_version:'1.7',...s};
   navigator.clipboard.writeText(JSON.stringify(payload,null,2)).then(()=>showToast('✓ Copied to clipboard'));
 }
 
@@ -3896,6 +3990,6 @@ function classifySystemWithSettings(host,proto){
 // Init settings on page load
 (function(){const s=loadSettings();applySettings(s);updateSettingsBadge(s);})();
 </script>
-<a href="https://github.com/badbox29/mail_flow_analyzer" target="_blank" rel="noopener" style="position:fixed;bottom:12px;left:50%;transform:translateX(-50%);font-size:11px;color:var(--text-muted);background:var(--bg-card);border:1px solid var(--border);border-radius:6px;padding:4px 12px;z-index:50;letter-spacing:.3px;text-decoration:none;transition:color .15s,border-color .15s;" onmouseover="this.style.color='var(--blue)';this.style.borderColor='var(--blue)'" onmouseout="this.style.color='var(--text-muted)';this.style.borderColor='var(--border)'">Mail Flow Analyzer v1.6</a>
+<a href="https://github.com/badbox29/mail_flow_analyzer" target="_blank" rel="noopener" style="position:fixed;bottom:12px;left:50%;transform:translateX(-50%);font-size:11px;color:var(--text-muted);background:var(--bg-card);border:1px solid var(--border);border-radius:6px;padding:4px 12px;z-index:50;letter-spacing:.3px;text-decoration:none;transition:color .15s,border-color .15s;" onmouseover="this.style.color='var(--blue)';this.style.borderColor='var(--blue)'" onmouseout="this.style.color='var(--text-muted)';this.style.borderColor='var(--border)'">Mail Flow Analyzer v1.7</a>
 </body>
 </html>
