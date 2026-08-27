@@ -2240,6 +2240,7 @@ function renderBounceAnalysis(raw){
         <div style="font-size:14px;font-weight:600;color:${sm.color};margin-bottom:4px;">${esc(b.classLabel)}</div>
         <div style="font-size:13px;color:var(--text-secondary);line-height:1.6;">${esc(b.friendlyReason||sm.blurb)}</div>
       </div>
+      <!--SPLIT_DELIVERY_SLOT-->
 
       <div class="hop-detail-grid">
         ${b.failedRecipients.length?`<div class="hd-item" style="grid-column:1/-1;"><div class="hd-lbl">Failed Recipient${b.failedRecipients.length>1?'s ('+b.failedRecipients.length+')':''}</div><div class="hd-val">${b.failedRecipients.map(r=>esc(r)).join('<br>')}</div></div>`:''}
@@ -2279,7 +2280,40 @@ function renderBounceAnalysis(raw){
 
   // Embedded original message analysis
   if(b.originalHeaders){
+    // ── RECIPIENT STATUS RECONSTRUCTION ──────────────────────────────────
+    // Gather all original recipients from the embedded To/Cc, compare against
+    // the NDR's failed list, and detect any explicit per-recipient success.
+    const failedLower=new Set(b.failedRecipients.map(r=>r.toLowerCase()));
+    const origTo=(b.originalHeaders.match(/^To:\s*([\s\S]*?)(?:\n\S|$)/im)||[])[1]||'';
+    const origCc=(b.originalHeaders.match(/^Cc:\s*([\s\S]*?)(?:\n\S|$)/im)||[])[1]||'';
+    const allOrigAddrs=[...new Set(((origTo+' '+origCc).match(/[\w.+\-]+@[\w.\-]+/g)||[]).map(a=>a.toLowerCase()))];
+    // Explicit delivered/relayed recipients (RFC3464 Action: delivered/relayed, or Exchange text)
+    const deliveredLower=new Set();
+    const rfc3464Delivered=b.originalHeaders.match(/Final-Recipient:[^\n]*;\s*([\w.+\-]+@[\w.\-]+)[\s\S]*?Action:\s*(delivered|relayed)/ig);
+    // (rare; most NDRs don't include it — reconstruction stays honest without it)
+    const recipientStatus=[];
+    failedLower.forEach(r=>recipientStatus.push({addr:r,status:'failed'}));
+    deliveredLower.forEach(r=>{if(!failedLower.has(r))recipientStatus.push({addr:r,status:'delivered'});});
+    allOrigAddrs.forEach(r=>{
+      if(!failedLower.has(r)&&!deliveredLower.has(r))recipientStatus.push({addr:r,status:'unreported'});
+    });
+
+    // Split-delivery notice in the bounce card (inserted before embedded analysis)
+    const otherRecips=recipientStatus.filter(r=>r.status!=='failed');
+    if(otherRecips.length){
+      html=html.replace('<!--SPLIT_DELIVERY_SLOT-->',renderSplitDeliveryNotice(b,recipientStatus));
+    }
+
+    // Set context so the embedded analysis renders a recipient-specific outcome
+    window._bounceContext={
+      recipientStatus,
+      failedRecipients:b.failedRecipients,
+      severity:b.severity,
+      classLabel:b.classLabel,
+    };
     const embeddedHtml=decodeHeaders(b.originalHeaders,true);
+    window._bounceContext=null;
+
     html+=`<div style="margin:20px 0 10px;display:flex;align-items:center;gap:10px;">
       <div style="flex:1;height:1px;background:var(--border);"></div>
       <div style="font-size:12px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.8px;">Analysis of the Original Message</div>
@@ -2293,9 +2327,47 @@ function renderBounceAnalysis(raw){
 
   document.getElementById('printBtn').style.display='flex';
   window._bounceData=b;
+  html=html.replace('<!--SPLIT_DELIVERY_SLOT-->','');
   const res=document.getElementById('results');
   res.innerHTML=html;
   res.scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+// Render the split/partial delivery notice + per-recipient status breakdown
+function renderSplitDeliveryNotice(b, recipientStatus){
+  const failed=recipientStatus.filter(r=>r.status==='failed');
+  const delivered=recipientStatus.filter(r=>r.status==='delivered');
+  const unreported=recipientStatus.filter(r=>r.status==='unreported');
+  if(!recipientStatus.length)return '';
+  // Only show the "split" framing if there are recipients beyond the failed ones
+  const hasOthers=delivered.length+unreported.length>0;
+
+  const row=(r)=>{
+    const meta={
+      failed:{icon:'🔴',color:'var(--red)',label:'Failed'},
+      delivered:{icon:'🟢',color:'var(--green)',label:'Delivered'},
+      unreported:{icon:'⚪',color:'var(--text-muted)',label:'Not reported failed'},
+    }[r.status];
+    return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);">
+      <span style="font-size:12px;flex-shrink:0;">${meta.icon}</span>
+      <span style="flex:1;font-size:13px;color:var(--text-primary);word-break:break-all;">${esc(r.addr)}</span>
+      <span style="font-size:11px;font-weight:700;color:${meta.color};flex-shrink:0;">${meta.label}</span>
+    </div>`;
+  };
+
+  const notice = hasOthers
+    ? `This message was addressed to multiple recipients. This bounce reports a failure for <b>${failed.length} recipient${failed.length!==1?'s':''}</b> only — everything in this bounce analysis relates to the failed recipient${failed.length!==1?'s':''}. The other recipient${(delivered.length+unreported.length)!==1?'s were':' was'} not reported as failed by this NDR${delivered.length?', and some were explicitly confirmed delivered':''}. A standard NDR is silent about recipients that did not fail, so their delivery is not confirmed either way unless explicitly shown as delivered below.`
+    : `This bounce reports a failure for the recipient${failed.length!==1?'s':''} below.`;
+
+  return `<div style="background:var(--bg-card2);border:1px solid var(--border);border-radius:8px;padding:12px 16px;">
+    <div style="font-size:12px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px;">Recipient Status${hasOthers?' — Split / Partial Delivery':''}</div>
+    <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;margin-bottom:10px;">${notice}</div>
+    <div>
+      ${failed.map(row).join('')}
+      ${delivered.map(row).join('')}
+      ${unreported.map(row).join('')}
+    </div>
+  </div>`;
 }
 
 // Small inline tag showing internal/external classification of a server
@@ -3011,7 +3083,35 @@ function decodeHeaders(rawOverride, returnHtml){
   });
 
   // Delivery Outcome phase — always last
-  if(storyOutcome.length){
+  const bctx=window._bounceContext;
+  if(bctx&&bctx.recipientStatus&&bctx.recipientStatus.length){
+    // Recipient-specific outcome, driven by the bounce context — never a blanket "delivered"
+    const outcomeMeta=PHASE_META['outcome'];
+    const statusMeta={
+      failed:{icon:'🔴',color:'var(--red)',label:'Failed',bg:'var(--red-dim)',border:'rgba(239,68,68,.3)'},
+      delivered:{icon:'🟢',color:'var(--green)',label:'Delivered',bg:'var(--green-dim)',border:'rgba(34,197,94,.25)'},
+      unreported:{icon:'⚪',color:'var(--text-muted)',label:'Not reported failed by the bounce',bg:'var(--bg-card2)',border:'var(--border)'},
+    };
+    html+=`<div style="height:16px;display:flex;align-items:center;justify-content:center;">
+      <div style="width:1px;height:100%;background:var(--border);"></div>
+    </div>
+    <div class="phase-header">
+      <span class="phase-icon">${outcomeMeta.icon}</span>
+      <span class="phase-label">Delivery Outcome — Per Recipient</span>
+      <div class="phase-line"></div>
+    </div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;line-height:1.5;">This message bounced. Delivery outcome is determined by the bounce, not by these routing headers — shown per recipient below.</div>
+    <div style="display:flex;flex-direction:column;gap:6px;">
+      ${bctx.recipientStatus.map(r=>{
+        const m=statusMeta[r.status];
+        return `<div style="background:${m.bg};border:1px solid ${m.border};border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;">
+          <span style="font-size:13px;flex-shrink:0;">${m.icon}</span>
+          <span style="flex:1;font-size:13px;color:var(--text-primary);word-break:break-all;">${esc(r.addr)}</span>
+          <span style="font-size:11px;font-weight:700;color:${m.color};flex-shrink:0;">${m.label}</span>
+        </div>`;
+      }).join('')}
+    </div>`;
+  } else if(storyOutcome.length){
     const outcomeMeta=PHASE_META['outcome'];
     const outcomeIsGood=deliveryClass.mode==='completed';
     const outcomeBorder=outcomeIsGood?'rgba(34,197,94,.25)':deliveryClass.mode==='incomplete'||deliveryClass.mode==='deferred'?'rgba(245,158,11,.3)':'rgba(239,68,68,.3)';
