@@ -865,7 +865,7 @@ const SYS_PATTERNS=[
   {re:/barracuda|bsf\.barracudanetworks/i,    name:'Barracuda Gateway',       icon:'🛡',color:'purple', type:'gateway',
    authHeaders:['authentication-results'],
    indicators:['x-barracuda-spam-score','x-barracuda-connect','x-barracuda-start-time']},
-  {re:/esa\.cisco|ironport|c\.mail\./i,       name:'Cisco ESA',               icon:'🛡',color:'purple', type:'gateway',
+  {re:/esa\.cisco|ironport|\.iphmx\.com/i,     name:'Cisco ESA',               icon:'🛡',color:'purple', type:'gateway',
    authHeaders:['authentication-results'],
    indicators:['x-ironport-anti-spam-filtered','x-ironport-av','x-ironport-sendergroup']},
   {re:/abnormalsecurity/i,                    name:'Abnormal Security',       icon:'🛡',color:'purple', type:'gateway',
@@ -2705,7 +2705,16 @@ function decodeHeaders(rawOverride, returnHtml){
   // Build original vs final with explicit header priority
   const originalRecipient=xOriginalToEmail||toHeaderEmail||envelopeOriginal||null;
   const finalRecipient=deliveredToEmail||xForwardedToEmail||envelopeFinal||toHeaderEmail||null;
-  const recipientChanged=!!(originalRecipient&&finalRecipient&&originalRecipient!==finalRecipient);
+  // Multi-recipient awareness: gather ALL addressed recipients (To + Cc). If the final
+  // delivered address was already one of them, this is simply a multi-recipient message —
+  // the delivered mailbox was addressed all along, NOT a redirect. Only flag when the
+  // final recipient was NOT among the originally addressed recipients (a genuine alias,
+  // forward, distribution-group, or mail-flow-rule redirect to a different address).
+  const allAddressed=new Set();
+  ((getFirst(hdrs,'to')||'').match(/[\w.+\-]+@[\w.\-]+/gi)||[]).forEach(a=>allAddressed.add(a.toLowerCase()));
+  ((getFirst(hdrs,'cc')||'').match(/[\w.+\-]+@[\w.\-]+/gi)||[]).forEach(a=>allAddressed.add(a.toLowerCase()));
+  const finalWasAddressed=finalRecipient&&allAddressed.has(finalRecipient);
+  const recipientChanged=!!(originalRecipient&&finalRecipient&&originalRecipient!==finalRecipient&&!finalWasAddressed);
   // Evidence: direct if explicit forwarding headers present, correlated if inferred from envelope
   const recipientChangeEvidence=(xForwardedToEmail||xOriginalToEmail||deliveredToEmail)?'direct':'correlated';
 
