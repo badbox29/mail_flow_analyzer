@@ -2972,6 +2972,26 @@ function decodeHeaders(rawOverride, returnHtml){
   // configuration gap — reframe those rows accurately.
   const authInternalOrigin=isInternalOriginContext(hdrs, senderDomain);
 
+  // Origin-pass evidence: this message may have passed authentication at its ORIGIN
+  // (before a gateway/forwarding hop mangled it). Sources: gateway's own
+  // Authentication-Results-Original (authOrig), and the ARC chain, which preserves the
+  // authentication result recorded at each prior hop. When a check shows none/fail at the
+  // boundary but origin evidence shows it passed, the honest story is "broke in transit
+  // via forwarding/gateway processing," not "the domain has no record / is misconfigured."
+  const arcOriginAuth={};
+  const arcAllVals=getAll(hdrs,'arc-authentication-results');
+  for(const v of arcAllVals){
+    const p=parseAuth(v);
+    // keep the strongest (pass) result seen across ARC instances
+    ['spf','dkim','dmarc'].forEach(k=>{ if(p[k]==='pass')arcOriginAuth[k]='pass'; else if(p[k]&&!arcOriginAuth[k])arcOriginAuth[k]=p[k]; });
+  }
+  // originPass[key] = true if origin evidence (gateway-original OR ARC) shows this check passed
+  const originPass={
+    spf:(authOrig&&authOrig.spf==='pass')||arcOriginAuth.spf==='pass',
+    dkim:(authOrig&&authOrig.dkim==='pass')||arcOriginAuth.dkim==='pass',
+    dmarc:(authOrig&&authOrig.dmarc==='pass')||arcOriginAuth.dmarc==='pass',
+  };
+
   const authDefs=[
     {key:'spf',label:'SPF',fullName:'Sender Policy Framework',
      status:{
@@ -3075,6 +3095,31 @@ function decodeHeaders(rawOverride, returnHtml){
       }[d.key];
       s={badge:'b-none',short:'Internal',headline:label+' not evaluated — internal-origin mail',
          detail:'This message was stamped as internal-origin by your organization (AuthAs: Internal / originating), and '+senderDomain+' is one of your configured internal domains. '+why};
+    }
+    // Origin-pass reframing: boundary shows none/fail, but the gateway's original result
+    // or the ARC chain shows this check PASSED at the message's origin. The failure is a
+    // forwarding/gateway artifact, not a sender configuration problem.
+    else if(!authInternalOrigin&&(statusKey==='none'||statusKey==='fail')&&['spf','dkim','dmarc'].includes(d.key)&&originPass[d.key]){
+      const label={spf:'SPF',dkim:'DKIM',dmarc:'DMARC'}[d.key];
+      const originSrc=(authOrig&&authOrig[d.key]==='pass')?(effectiveAuth._gateway||'the sending gateway'):'the ARC chain';
+      const why={
+        spf:'passed SPF at its origin but the result changed in transit because the message was forwarded or relayed from a different IP than the original sender. This is a known forwarding artifact, not a problem with '+senderDomain+'\'s SPF record.',
+        dkim:'was DKIM-signed and verified at its origin, but the signature was broken in transit — typically because an intermediate service (a signature/branding appliance, mailing list, or forwarder) modified the message body after signing. This is a forwarding artifact, not evidence that '+senderDomain+' failed to sign.',
+        dmarc:'passed DMARC at its origin, but alignment was broken by forwarding/relay processing before it reached your boundary. This is a forwarding artifact — it does not mean '+senderDomain+' lacks a DMARC policy or that the message is spoofed.'
+      }[d.key];
+      s={badge:'b-none',short:'Pass at origin',headline:label+' passed at origin — broke in transit',
+         detail:'The final boundary recorded '+statusKey.toUpperCase()+' for '+label+', but '+originSrc+' recorded a PASS when the message left its source. In other words, this message '+why+' The origin result is the reliable one for judging legitimacy.'};
+    }
+    // Honest fallback for none: the tool reads headers and cannot query DNS, so it must
+    // not assert the domain "has no record." Reframe DNS-claiming language to be accurate.
+    else if(!authInternalOrigin&&statusKey==='none'&&['spf','dmarc','dkim'].includes(d.key)){
+      const label={spf:'SPF',dmarc:'DMARC',dkim:'DKIM'}[d.key];
+      const why={
+        spf:'This message did not carry an SPF pass result on the path analyzed. This tool reads message headers and cannot query DNS, so this does not necessarily mean '+senderDomain+' lacks an SPF record — only that no SPF pass was recorded for this message. If this was forwarded or relayed, SPF may have been evaluated against an intermediate server rather than the original sender.',
+        dmarc:'This message did not show a DMARC result on the path analyzed. This tool reads headers and cannot query DNS, so this does not necessarily mean '+senderDomain+' has not published a DMARC policy — only that no DMARC evaluation was recorded for this message.',
+        dkim:'This message did not carry a verified DKIM signature on the path analyzed. This may mean it was not signed, or that a signature was broken by forwarding/relay processing before it reached your boundary. The tool cannot query DNS to confirm whether '+senderDomain+' publishes DKIM keys — it only reports what this message carried.'
+      }[d.key];
+      s={badge:'b-none',short:'Not recorded',headline:label+' result not recorded for this message',detail:why};
     }
     const c=authClass(v||'none');
     const borderColor=c==='pass'?'rgba(34,197,94,.3)':c==='fail'?'rgba(239,68,68,.3)':c==='soft'?'rgba(245,158,11,.3)':'var(--border)';
