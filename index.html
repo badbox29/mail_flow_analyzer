@@ -3060,12 +3060,12 @@ function decodeHeaders(rawOverride, returnHtml){
     if(authInternalOrigin&&(statusKey==='none')&&['spf','dkim','dmarc'].includes(d.key)){
       const label={spf:'SPF',dkim:'DKIM',dmarc:'DMARC'}[d.key];
       const why={
-        spf:'SPF is evaluated by the receiving server at an inbound boundary. Because this message originated inside your organization and never crossed such a boundary, SPF was not evaluated. This does <b>not</b> mean '+esc(senderDomain)+' lacks an SPF record — it simply was not checked on this internal path.',
+        spf:'SPF is evaluated by the receiving server at an inbound boundary. Because this message originated inside your organization and never crossed such a boundary, SPF was not evaluated. This does not mean '+senderDomain+' lacks an SPF record — it simply was not checked on this internal path.',
         dkim:'This message was submitted internally (e.g. via Exchange/MAPI or an internal service) and was not DKIM-signed on this path. For intra-organization mail this is normal and expected — DKIM signing and verification apply to mail crossing external boundaries, not internal delivery.',
-        dmarc:'DMARC is evaluated at an inbound boundary when a message arrives from outside. Because this message originated internally and was stamped as internal by your organization, DMARC was not evaluated. This does <b>not</b> mean '+esc(senderDomain)+' lacks a DMARC policy — it simply was not checked here.'
+        dmarc:'DMARC is evaluated at an inbound boundary when a message arrives from outside. Because this message originated internally and was stamped as internal by your organization, DMARC was not evaluated. This does not mean '+senderDomain+' lacks a DMARC policy — it simply was not checked here.'
       }[d.key];
       s={badge:'b-none',short:'Internal',headline:label+' not evaluated — internal-origin mail',
-         detail:'This message was stamped as internal-origin by your organization (AuthAs: Internal / originating), and '+esc(senderDomain)+' is one of your configured internal domains. '+why};
+         detail:'This message was stamped as internal-origin by your organization (AuthAs: Internal / originating), and '+senderDomain+' is one of your configured internal domains. '+why};
     }
     const c=authClass(v||'none');
     const borderColor=c==='pass'?'rgba(34,197,94,.3)':c==='fail'?'rgba(239,68,68,.3)':c==='soft'?'rgba(245,158,11,.3)':'var(--border)';
@@ -3324,13 +3324,13 @@ function decodeHeaders(rawOverride, returnHtml){
     <div class="card-desc">${gatewayMode?'Results reflect <b>'+esc(gwName)+'</b> gateway verification — boundary re-check failures suppressed':'Your mail system\'s view of this message\'s trustworthiness'}</div>
   </div></div>
   <div class="sec-grid">
-    <div class="sec-item${effectiveAuth.spf==='pass'?'':effectiveAuth.spf==='softfail'?' style="border-color:rgba(245,158,11,.3);"':' style="border-color:rgba(239,68,68,.3);"'}">
+    <div class="sec-item${effectiveAuth.spf==='pass'?'':authInternalOrigin?'':effectiveAuth.spf==='softfail'?' style="border-color:rgba(245,158,11,.3);"':effectiveAuth.spf?' style="border-color:rgba(239,68,68,.3);"':''}">
       <div class="sec-q">Is the sender authorized?</div>
-      <div class="sec-a" style="color:${effectiveAuth.spf==='pass'?'var(--green)':effectiveAuth.spf==='softfail'?'var(--orange)':'var(--red)'}">
-        ${effectiveAuth.spf==='pass'?'✓ Yes — SPF passed':effectiveAuth.spf==='softfail'?'~ Possibly — SPF softfail':effectiveAuth.spf==='fail'?'✗ No — SPF hard fail':'? SPF: '+(effectiveAuth.spf||'not checked')}
+      <div class="sec-a" style="color:${effectiveAuth.spf==='pass'?'var(--green)':authInternalOrigin&&effectiveAuth.spf!=='fail'?'var(--text-muted)':effectiveAuth.spf==='softfail'?'var(--orange)':effectiveAuth.spf==='fail'?'var(--red)':'var(--text-muted)'}">
+        ${effectiveAuth.spf==='pass'?'✓ Yes — SPF passed':authInternalOrigin&&effectiveAuth.spf!=='fail'?'⊙ Internal mail — SPF not applicable':effectiveAuth.spf==='softfail'?'~ Possibly — SPF softfail':effectiveAuth.spf==='fail'?'✗ No — SPF hard fail':'? SPF: '+(effectiveAuth.spf||'not checked')}
       </div>
       <div style="font-size:11px;color:var(--text-muted);margin-top:4px;line-height:1.4;">
-        ${effectiveAuth.spf==='pass'?senderDomain+' DNS records list the sending server as authorized.'+( gatewayMode&&auth.spf!=='pass'?' The boundary server saw SPF '+esc(auth.spf||'unknown')+' because '+esc(gwName)+' forwards from its own IP pool, not '+senderDomain+'\'s original sending IP.':''):effectiveAuth.spf==='softfail'?'The sending server is not in '+senderDomain+'\'s approved list, but '+senderDomain+' configured SPF to allow soft failures (~all). Could be legitimate but misconfigured.':effectiveAuth.spf==='fail'?'The sending server is explicitly not authorized by '+senderDomain+' (-all). Strong spoofing indicator.':'Could not verify whether the sending server is authorized by '+senderDomain+'.'}
+        ${effectiveAuth.spf==='pass'?senderDomain+' DNS records list the sending server as authorized.'+( gatewayMode&&auth.spf!=='pass'?' The boundary server saw SPF '+esc(auth.spf||'unknown')+' because '+esc(gwName)+' forwards from its own IP pool, not '+senderDomain+'\'s original sending IP.':''):authInternalOrigin&&effectiveAuth.spf!=='fail'?'This message originated inside your organization and was handled as internal mail. SPF is checked at inbound boundaries and does not apply to internal-origin messages — this is not a gap in '+senderDomain+'\'s configuration.':effectiveAuth.spf==='softfail'?'The sending server is not in '+senderDomain+'\'s approved list, but '+senderDomain+' configured SPF to allow soft failures (~all). Could be legitimate but misconfigured.':effectiveAuth.spf==='fail'?'The sending server is explicitly not authorized by '+senderDomain+' (-all). Strong spoofing indicator.':'Could not verify whether the sending server is authorized by '+senderDomain+'.'}
       </div>
     </div>
     <div class="sec-item">
@@ -3342,22 +3342,22 @@ function decodeHeaders(rawOverride, returnHtml){
         TLS encrypts the message as it travels between mail servers, preventing interception in transit. It does not verify the sender\'s identity — that is SPF/DKIM\'s job.
       </div>
     </div>
-    <div class="sec-item${effectiveAuth.dmarc==='pass'?'':' style="border-color:rgba(239,68,68,.3);"'}">
+    <div class="sec-item${effectiveAuth.dmarc==='pass'?'':authInternalOrigin&&effectiveAuth.dmarc!=='fail'?'':effectiveAuth.dmarc==='fail'?' style="border-color:rgba(239,68,68,.3);"':''}">
       <div class="sec-q">Did DMARC policy pass?</div>
       <div class="sec-a" style="color:${effectiveAuth.dmarc==='pass'?'var(--green)':effectiveAuth.dmarc==='fail'?'var(--red)':'var(--text-muted)'}">
-        ${effectiveAuth.dmarc==='pass'?'✓ Yes — message is aligned with '+senderDomain:effectiveAuth.dmarc==='fail'?'✗ No — message failed '+senderDomain+'\'s policy':'? '+(effectiveAuth.dmarc||'Not evaluated')}
+        ${effectiveAuth.dmarc==='pass'?'✓ Yes — message is aligned with '+senderDomain:authInternalOrigin&&effectiveAuth.dmarc!=='fail'?'⊙ Internal mail — DMARC not applicable':effectiveAuth.dmarc==='fail'?'✗ No — message failed '+senderDomain+'\'s policy':'? '+(effectiveAuth.dmarc||'Not evaluated')}
       </div>
       <div style="font-size:11px;color:var(--text-muted);margin-top:4px;line-height:1.4;">
-        ${effectiveAuth.dmarc==='pass'?'DMARC passed at the gateway — the From: address aligns with '+senderDomain+'.'+( gatewayMode&&auth.dmarc!=='pass'?' The boundary server later recorded DMARC '+esc(auth.dmarc||'unknown')+' because the gateway forwarding path broke alignment.':''):'DMARC is the strongest anti-spoofing check. A fail means this message claimed to be from '+senderDomain+' but could not prove it.'}
+        ${effectiveAuth.dmarc==='pass'?'DMARC passed at the gateway — the From: address aligns with '+senderDomain+'.'+( gatewayMode&&auth.dmarc!=='pass'?' The boundary server later recorded DMARC '+esc(auth.dmarc||'unknown')+' because the gateway forwarding path broke alignment.':''):authInternalOrigin&&effectiveAuth.dmarc!=='fail'?'DMARC is evaluated when mail arrives from outside. This message originated internally and was stamped as internal by your organization, so DMARC does not apply — this is expected, not a spoofing indicator.':'DMARC is the strongest anti-spoofing check. A fail means this message claimed to be from '+senderDomain+' but could not prove it.'}
       </div>
     </div>
-    <div class="sec-item${effectiveAuth.dkim==='pass'?'':' style="border-color:rgba(239,68,68,.3);"'}">
+    <div class="sec-item${effectiveAuth.dkim==='pass'?'':authInternalOrigin&&effectiveAuth.dkim!=='fail'?'':effectiveAuth.dkim==='fail'?' style="border-color:rgba(239,68,68,.3);"':''}">
       <div class="sec-q">Was the message signed (DKIM)?</div>
       <div class="sec-a" style="color:${effectiveAuth.dkim==='pass'?'var(--green)':effectiveAuth.dkim==='fail'?'var(--red)':'var(--text-muted)'}">
-        ${effectiveAuth.dkim==='pass'?'✓ Valid — signed by '+senderDomain:effectiveAuth.dkim==='fail'?'✗ Invalid or missing signature':effectiveAuth.dkim==='present'?'~ Signature present, result unclear':'? Not signed'}
+        ${effectiveAuth.dkim==='pass'?'✓ Valid — signed by '+senderDomain:authInternalOrigin&&effectiveAuth.dkim!=='fail'&&effectiveAuth.dkim!=='present'?'⊙ Internal mail — DKIM not applicable':effectiveAuth.dkim==='fail'?'✗ Invalid or missing signature':effectiveAuth.dkim==='present'?'~ Signature present, result unclear':'? Not signed'}
       </div>
       <div style="font-size:11px;color:var(--text-muted);margin-top:4px;line-height:1.4;">
-        ${effectiveAuth.dkim==='pass'?senderDomain+' signed this message and the signature was verified by the gateway.'+( gatewayMode&&auth.dkim!=='pass'?' The boundary server recorded DKIM '+esc(auth.dkim||'unknown')+' — this is expected when a gateway re-processes the message body, which can invalidate the original signature.':''):'A valid DKIM signature proves '+senderDomain+' signed this message and that it was not altered after signing.'}
+        ${effectiveAuth.dkim==='pass'?senderDomain+' signed this message and the signature was verified by the gateway.'+( gatewayMode&&auth.dkim!=='pass'?' The boundary server recorded DKIM '+esc(auth.dkim||'unknown')+' — this is expected when a gateway re-processes the message body, which can invalidate the original signature.':''):authInternalOrigin&&effectiveAuth.dkim!=='fail'&&effectiveAuth.dkim!=='present'?'This message was submitted internally and not DKIM-signed on that path. For intra-organization mail this is normal — DKIM applies to mail crossing external boundaries.':'A valid DKIM signature proves '+senderDomain+' signed this message and that it was not altered after signing.'}
       </div>
     </div>
     ${senderIP?`<div class="sec-item"><div class="sec-q">Originating IP address</div><div class="sec-a mono" style="font-size:13px;">${esc(senderIP)}</div><div style="font-size:11px;color:var(--text-muted);margin-top:4px;">The IP address of the first mail server that handled this message${gatewayMode?' (before routing through '+esc(gwName)+')':''}</div></div>`:''}
