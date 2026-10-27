@@ -1000,7 +1000,19 @@ function parseReceived(val){
   const withM=val.match(/with\s+([\w]+)/i);
   const dateM=val.match(/;\s*(.+)$/);
   const forM=val.match(/for\s+<([^>]+)>/i);
-  const ipM=(fromM&&fromM[2])?fromM[2].match(/[\d\.]+/):null;
+  // Extract the sending IP from the from-clause parenthetical, e.g.
+  //   "from host.name (host-1-2-3-4.example.com. [1.2.3.4])"  or  "(1.2.3.4)"
+  // Prefer a bracketed address, then a full IPv4, then IPv6 — never the first
+  // digit-run (which would grab "198" from a hyphenated PTR like 198-184-248-250).
+  let ip=null;
+  if(fromM&&fromM[2]){
+    const paren=fromM[2];
+    const bracket=paren.match(/\[([0-9a-fA-F:.]+)\]/);            // [1.2.3.4] or [IPv6]
+    const ipv4=paren.match(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/);      // full dotted-quad
+    const ipv6=paren.match(/\b([0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{0,4}){2,7})\b/);
+    ip=bracket?bracket[1]:(ipv4?ipv4[1]:(ipv6?ipv6[1]:null));
+  }
+  const ipM=ip?[ip]:null;
   const tlsM=val.match(/TLS[\w_.]+/i);
   const idM=val.match(/id\s+([\w.\-]+)/i);
   const viaM=val.match(/via\s+(\S+)/i);
