@@ -2535,7 +2535,7 @@ function renderDnsSection(dns,domain,loading){
       :(spf.withinLimit?'<span class="badge b-pass">'+lc+' / 10 lookups</span>':'<span class="badge b-fail">'+lc+' / 10 lookups — EXCEEDS RFC 7208</span>');
     spfHtml='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;"><b style="font-size:13px;">SPF</b>'+limitBadge+(spf.allQualifier?'<span class="badge b-none">'+esc(spf.allQualifier)+'all</span>':'')+'</div>'
       +'<pre style="margin:0 0 8px;padding:8px 10px;background:var(--bg-input);border:1px solid var(--border);border-radius:4px;font-family:\'JetBrains Mono\',monospace;font-size:11px;color:var(--text-secondary);white-space:pre-wrap;word-break:break-all;">'+esc(spf.record)+'</pre>';
-    if(spf.tree&&spf.tree.length){spfHtml+='<div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">Include chain:</div>'+renderSpfTree(spf.tree,0);}
+    if(spf.tree&&spf.tree.length){spfHtml+=renderSpfLedger(spf.tree,spf.lookupCount);}
     (spf.notes||[]).forEach(n=>{spfHtml+='<div style="font-size:12px;color:'+(/exceed|permerror|multiple/i.test(n)?'var(--orange)':'var(--text-muted)')+';line-height:1.5;margin-top:4px;">'+esc(n)+'</div>';});
   }
 
@@ -2573,15 +2573,74 @@ function renderDnsSection(dns,domain,loading){
   );
 }
 
-// Render the SPF include tree recursively
+// Flatten the SPF tree into an ordered list of ONLY the lookup-consuming
+// mechanisms (include/redirect/a/mx/ptr/exists), preserving nesting depth.
+function flattenSpfLookups(nodes,depth,out){
+  out=out||[];
+  for(const n of (nodes||[])){
+    if(n.lookups>0){
+      out.push({type:n.type,target:n.target,depth:depth,note:n.note});
+      if(n.children&&n.children.length)flattenSpfLookups(n.children,depth+1,out);
+    }
+  }
+  return out;
+}
+
+// Primary view: a clean "lookup ledger" showing each lookup-consuming mechanism
+// in evaluation order with a running count, plus a collapsed full tree with IPs.
+function renderSpfLedger(tree,lookupCount){
+  const ledger=flattenSpfLookups(tree,0,[]);
+  if(!ledger.length)return '';
+  const limit=10;
+  let running=0;
+  const rows=ledger.map((m)=>{
+    running++;
+    const over=running>limit;
+    const crossed=running===limit+1;
+    // label: show the mechanism type cleanly
+    const label=(m.type==='include'?'include:':m.type==='redirect'?'redirect=':m.type+':');
+    const name=m.target&&m.target.indexOf(':')>=0?m.target.split(':').slice(1).join(':'):(m.target&&m.target.indexOf('=')>=0?m.target.split('=').slice(1).join('='):m.target||m.type);
+    const indent=m.depth*16;
+    return (crossed?'<div style="border-top:1px dashed var(--red);margin:4px 0;padding-top:4px;"><div style="font-size:10px;color:var(--red);font-weight:700;margin-bottom:2px;">▲ RFC 7208 limit of 10 reached — mechanisms below cannot be evaluated</div></div>':'')
+      +'<div style="display:flex;align-items:center;gap:8px;padding:3px 0;'+(m.depth>0?'margin-left:'+indent+'px;':'')+'">'
+      +'<span style="flex-shrink:0;width:22px;text-align:right;font-size:11px;font-weight:700;color:'+(over?'var(--red)':'var(--text-muted)')+';font-family:\'JetBrains Mono\',monospace;">'+running+'</span>'
+      +'<span style="flex-shrink:0;font-size:11px;color:var(--text-muted);">'+(m.depth>0?'└ ':'')+'</span>'
+      +'<span style="flex:1;font-size:12px;font-family:\'JetBrains Mono\',monospace;color:var(--text-primary);word-break:break-all;"><span style="color:var(--cyan);">'+esc(label)+'</span>'+esc(name)+'</span>'
+      +(m.note?'<span style="font-size:10px;color:var(--text-muted);flex-shrink:0;">'+esc(m.note)+'</span>':'')
+      +'</div>';
+  }).join('');
+
+  const treeId='spftree-'+Math.random().toString(36).slice(2);
+  const chevId='spfchev-'+Math.random().toString(36).slice(2);
+  const overLimit=lookupCount!=null&&lookupCount>limit;
+
+  return '<div style="margin-top:6px;">'
+    +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">'
+    +'<div style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;">Lookup Breakdown</div>'
+    +(lookupCount!=null?'<div style="font-size:11px;color:'+(overLimit?'var(--red)':'var(--text-muted)')+';">'+lookupCount+' of 10 DNS lookups used</div>':'')
+    +'</div>'
+    +'<div style="background:var(--bg-card2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;">'+rows+'</div>'
+    // Collapsed full tree (with IPs) for those who want everything
+    +'<div onclick="var e=document.getElementById(\''+treeId+'\');var c=document.getElementById(\''+chevId+'\');var open=e.style.display===\'none\';e.style.display=open?\'block\':\'none\';c.textContent=open?\'▾ Hide full record tree (with IP ranges)\':\'▸ Show full record tree (with IP ranges)\';" style="cursor:pointer;font-size:11px;color:var(--blue);margin-top:8px;user-select:none;"><span id="'+chevId+'">▸ Show full record tree (with IP ranges)</span></div>'
+    +'<div id="'+treeId+'" style="display:none;margin-top:8px;padding:8px 12px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;">'+renderSpfTree(tree,0)+'</div>'
+    +'</div>';
+}
+
+// Full include tree with IPs (collapsed by default). Lookup-consuming mechanisms
+// are highlighted; ip4/ip6 leaves are muted since they don't count toward the limit.
 function renderSpfTree(nodes,depth){
   if(!nodes||!nodes.length)return '';
-  let out='<div style="margin-left:'+(depth*14)+'px;">';
+  let out='<div style="margin-left:'+(depth*16)+'px;">';
   for(const n of nodes){
-    const icon=n.type==='include'?'↳ include:':n.type==='redirect'?'↳ redirect=':n.lookups>0?'• '+n.type+':':'';
-    if(n.type==='ip'||n.type==='all'||n.type==='other'){out+='<div style="font-size:11px;color:var(--text-muted);font-family:\'JetBrains Mono\',monospace;">'+esc(n.target)+'</div>';}
-    else{
-      out+='<div style="font-size:11px;font-family:\'JetBrains Mono\',monospace;color:var(--text-secondary);">'+esc(icon)+' '+esc(n.target||'')+(n.lookups>0?' <span style="color:var(--orange);">[+1 lookup]</span>':'')+(n.note?' <span style="color:var(--text-muted);">— '+esc(n.note)+'</span>':'')+'</div>';
+    if(n.type==='ip'||n.type==='all'||n.type==='other'){
+      out+='<div style="font-size:11px;color:var(--text-muted);font-family:\'JetBrains Mono\',monospace;opacity:.8;">'+esc(n.target)+'</div>';
+    } else {
+      const label=n.type==='include'?'include:':n.type==='redirect'?'redirect=':n.type+':';
+      out+='<div style="font-size:11px;font-family:\'JetBrains Mono\',monospace;color:var(--text-secondary);padding:1px 0;">'
+        +'<span style="color:var(--text-muted);">'+(depth>0?'└ ':'')+'</span>'
+        +'<span style="color:var(--cyan);">'+esc(label)+'</span>'+esc(n.target&&(n.target.indexOf(':')>=0||n.target.indexOf('=')>=0)?n.target.replace(/^[^:=]+[:=]/,''):(n.target||''))
+        +(n.lookups>0?' <span style="color:var(--orange);font-weight:700;">+1</span>':'')
+        +(n.note?' <span style="color:var(--text-muted);">— '+esc(n.note)+'</span>':'')+'</div>';
       if(n.children&&n.children.length)out+=renderSpfTree(n.children,depth+1);
     }
   }
