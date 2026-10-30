@@ -7,10 +7,6 @@ Designed for mail administrators and technically capable users who need fast ans
 #### Screenshot
 ![Screenshot](screenshot.png)
 
-#### Live Demo
-[https://badbox29.github.io/rescission/](https://badbox29.github.io/mail_flow_analyzer/)
-
-
 ---
 
 ## Features
@@ -192,9 +188,22 @@ All processing happens locally in your browser. Headers are never transmitted an
 
 ---
 
+## Testing
+
+A Node-based regression test harness (`test-harness.js`) validates the parsing and analysis logic without a browser. It extracts the script from `index.html`, runs it in a sandboxed VM context, and asserts on the output of the core functions (header parsing, IP extraction, gateway/system classification, internal-origin awareness, authentication interpretation, the NDR/bounce engine, and the copyable summary).
+
+```
+node test-harness.js                 # run against ./index.html
+node test-harness.js path/to.html    # run against a specific build
+```
+
+It exits 0 if all tests pass and 1 if any fail, so it can be wired into a pre-commit hook or CI step. Fixtures are inline and self-contained. Add new cases to the `TESTS` array as functionality grows.
+
+---
+
 ## Version
 
-v1.6
+v1.7
 
 ---
 
