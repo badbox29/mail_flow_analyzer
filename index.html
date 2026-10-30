@@ -71,6 +71,7 @@ textarea::placeholder{color:var(--text-muted);}
 .b-fail{background:var(--red-dim);color:var(--red);border:1px solid rgba(239,68,68,.25);}
 .b-soft{background:var(--orange-dim);color:var(--orange);border:1px solid rgba(245,158,11,.25);}
 .b-none{background:var(--bg-card2);color:var(--text-muted);border:1px solid var(--border);}
+.b-error{background:var(--orange-dim);color:var(--orange);border:1px solid rgba(245,158,11,.4);}
 .b-blue{background:var(--blue-dim);color:var(--blue);border:1px solid rgba(59,130,246,.25);}
 .b-purple{background:var(--purple-dim);color:var(--purple);border:1px solid rgba(167,139,250,.25);}
 /* SUMMARY GRID */
@@ -1119,10 +1120,11 @@ function authClass(v){
   if(v==='pass'||v.startsWith('pass'))return'pass';
   if(v==='fail'||v==='hardfail')return'fail';
   if(v==='softfail')return'soft';
+  if(v==='permerror'||v==='temperror')return'error';
   if(v==='none'||v==='neutral')return'none';
   return'none';
 }
-function authIcon(v){const c=authClass(v);return c==='pass'?'✓':c==='fail'?'✗':c==='soft'?'~':'?';}
+function authIcon(v){const c=authClass(v);return c==='pass'?'✓':c==='fail'?'✗':c==='soft'?'~':c==='error'?'⚠':'?';}
 function authBadge(label,val){
   if(!val)return'';
   const c=authClass(val);
@@ -1478,6 +1480,28 @@ function generateInvestigationPoint(hops,auth,effectiveAuth,aOrig,gatewayMode,gw
   const invFromDom=((fromAddr||'').match(/@([\w.\-]+)/)||[])[1]||'';
   const invInternalOrigin=isInternalOriginContext(hdrs, invFromDom);
 
+  // Quarantine-hold heuristic: a delay over 1 hour combined with authentication failures
+  // (and especially a DMARC quarantine/reject disposition) is far more likely a quarantine
+  // hold with later manual release than a mail-transit delay. We can't confirm release from
+  // headers, so this is expressed as "likely," not certain.
+  const QUARANTINE_DELAY_MS=3600000; // 1 hour
+  const rawHdrText=(hdrs||[]).map(h=>h.name+': '+h.value).join('\n');
+  const dmarcQuarantinePolicy=/dmarc=(fail|quarantine)/i.test(rawHdrText)||/action=(quarantine|oreject|reject)/i.test(rawHdrText);
+  const authHasFailure=(auth&&(auth.spf==='fail'||auth.spf==='softfail'||auth.dmarc==='fail'||auth.dmarc==='permerror'||auth.dkim==='fail'))||dmarcQuarantinePolicy;
+  const likelyQuarantineHold=maxDelayMs>=QUARANTINE_DELAY_MS&&authHasFailure;
+  // Build the auth-reason fragment used in the quarantine explanation
+  const qAuthBits=[];
+  if(auth){
+    if(auth.dmarc==='fail')qAuthBits.push('DMARC failed');
+    else if(auth.dmarc==='permerror')qAuthBits.push('DMARC permerror');
+    if(auth.spf==='fail')qAuthBits.push('SPF failed');
+    else if(auth.spf==='softfail')qAuthBits.push('SPF softfail');
+    if(auth.dkim==='fail')qAuthBits.push('DKIM failed');
+  }
+  if(/action=quarantine/i.test(rawHdrText))qAuthBits.push('sender policy = quarantine');
+  else if(/action=(oreject|reject)/i.test(rawHdrText))qAuthBits.push('sender policy = reject');
+  const qAuthStr=qAuthBits.length?qAuthBits.join(', '):'authentication issues were present';
+
   // ── CRITICAL: failure modes, major delays ──────────────────────────────────
   if(deliveryClass.mode==='bounced'||deliveryClass.mode==='rejected'){
     urgency='critical';
@@ -1487,6 +1511,16 @@ function generateInvestigationPoint(hops,auth,effectiveAuth,aOrig,gatewayMode,gw
     reason='Rejected at this system'+(deliveryClass.ndrStatus?' with status '+esc(deliveryClass.ndrStatus):'')+'. This is the point of failure — no further hops were recorded.';
     evidence='direct';
     checks=['Review rejection logs at the rejecting server for the exact SMTP error code','Verify the recipient address exists and the mailbox is active','Check whether the sender IP or domain is listed on any block list (MX Toolbox, Spamhaus)','Confirm the sending domain has valid SPF and DKIM records'];
+  }
+  else if(likelyQuarantineHold){
+    // Large delay + auth failure → likely a quarantine hold/release, not a transit delay.
+    urgency='warn';
+    const sys=maxDelayHop?maxDelayHop.sys:null;
+    target=sys?sys.name:(maxDelayHop&&maxDelayHop.by||'the receiving system');
+    intro='A long delay was recorded, but it is likely a quarantine hold rather than a mail-transit problem.';
+    reason='A delay of '+delayLabel(maxDelayMs)+(pct!==null?' ('+pct+'% of total elapsed time)':'')+' was recorded. The tool flags any delay over 1 hour as a potential quarantine hold when authentication problems are present on the message — and here they are ('+qAuthStr+'). Given that, this delay is most likely the time the message spent held in quarantine before being reviewed and released, not time spent being processed or routed by a mail server. Note: headers do not explicitly record a quarantine release, so this is an inference from the delay length plus the authentication disposition, not a certainty.';
+    evidence='correlated';
+    checks=['Confirm whether this message was held in quarantine and manually released (check your quarantine/message trace logs for the release event and timestamp)','Review why authentication failed — '+qAuthStr,'If the sender is legitimate, work with them to correct their SPF/DKIM/DMARC so future messages are not quarantined','For a recurring sender, consider a tenant allow/policy exception once their authentication is verified'];
   }
   else if(maxDelayMs>=300000){
     // 5+ minute hop — clearly problematic regardless of context
@@ -3086,6 +3120,10 @@ function decodeHeaders(rawOverride, returnHtml){
          detail:senderDomain+' has no SPF record published in DNS. This means there is no way to verify whether the sending server is authorized. Absence of SPF is not inherently malicious but is a configuration gap on '+senderDomain+'\'s side.'},
        neutral:{badge:'b-none',short:'Neutral',headline:'SPF explicitly takes no stance',
          detail:senderDomain+'\'s SPF record ends in ?all, meaning they have published a record but are explicitly saying "we make no claim about whether this server is authorized." This provides no real protection.'},
+       permerror:{badge:'b-error',short:'PermError',headline:'SPF could not be evaluated — record problem',
+         detail:'SPF returned a permanent error (permerror) for '+senderDomain+'. This means the check could not be completed because of a problem with '+senderDomain+'\'s published SPF record — it is malformed, or (most commonly) it requires more than the 10 DNS lookups permitted by RFC 7208 and is therefore invalid. This is a configuration problem on '+senderDomain+'\'s side, not necessarily spoofing. Importantly, when SPF permerrors, it cannot contribute a passing result to DMARC, which often causes DMARC to fail as well. Note: this tool reads headers and cannot query DNS, so it cannot confirm the exact cause — resolving '+senderDomain+'\'s SPF record would be needed to see whether it exceeds the lookup limit.'},
+       temperror:{badge:'b-error',short:'TempError',headline:'SPF check temporarily failed',
+         detail:'SPF returned a temporary error (temperror) for '+senderDomain+' — usually a transient DNS resolution failure at the time the message was received. This is not conclusive and often resolves on its own; it does not indicate spoofing or a permanent configuration problem.'},
      }
     },
     {key:'dkim',label:'DKIM',fullName:'DomainKeys Identified Mail',
@@ -3108,6 +3146,10 @@ function decodeHeaders(rawOverride, returnHtml){
          detail:'DMARC failed for '+senderDomain+'. Neither SPF nor DKIM produced an authenticated domain that aligns with the From: address. This means the message claims to be from '+senderDomain+' but cannot be verified as such. What happens next depends on '+senderDomain+'\'s DMARC policy (p=): reject means your server should have blocked it, quarantine means junk folder, none means no action is enforced.'},
        none:{badge:'b-none',short:'None',headline:'No DMARC policy found',
          detail:senderDomain+' has not published a DMARC record. Without DMARC, there is no policy telling receiving mail servers what to do when SPF or DKIM fails. The message may still be legitimate — many domains have not yet deployed DMARC.'},
+       permerror:{badge:'b-error',short:'PermError',headline:'DMARC could not be evaluated — record problem',
+         detail:'DMARC returned a permanent error (permerror) for '+senderDomain+'. The DMARC policy record could not be properly evaluated — typically a malformed DMARC record, or an underlying SPF permerror (such as an SPF record exceeding the RFC 7208 10-lookup limit) that prevents DMARC from completing. This is a configuration problem on '+senderDomain+'\'s side. This tool reads headers and cannot query DNS, so it cannot confirm the exact cause.'},
+       temperror:{badge:'b-error',short:'TempError',headline:'DMARC check temporarily failed',
+         detail:'DMARC returned a temporary error (temperror) for '+senderDomain+', usually a transient DNS problem at evaluation time. This is not conclusive and typically resolves on its own.'},
      }
     },
     {key:'arc',label:'ARC',fullName:'Authenticated Received Chain',
@@ -4452,8 +4494,16 @@ function copyDiagnosticSummary(){
     text+=line('Mail provider',d.mailProvider+(d.isHybrid?' (Hybrid)':''));
     if(d.gwDetected)text+=line('Gateway',d.gwName);
 
-    // Key findings from non-clear security signals + investigation point
+    // Key findings from auth issues + non-clear security signals + investigation point
     const findings=[];
+    // Authentication failures surfaced explicitly
+    const authIssues=[];
+    const eaf=d.effectiveAuth||{};
+    const describe={fail:'failed',softfail:'softfail',permerror:'permerror (record problem)',temperror:'temperror (transient)'};
+    if(eaf.spf&&describe[eaf.spf])authIssues.push('SPF '+describe[eaf.spf]);
+    if(eaf.dmarc&&describe[eaf.dmarc])authIssues.push('DMARC '+describe[eaf.dmarc]);
+    if(eaf.dkim==='fail')authIssues.push('DKIM failed');
+    if(authIssues.length)findings.push('Authentication: '+authIssues.join(', ')+(d.gwDetected?' (note: results shown are gateway-verified; boundary may differ)':''));
     if(d.invPoint&&d.invPoint.urgency&&d.invPoint.urgency!=='clear'&&d.invPoint.reason)findings.push(d.invPoint.reason);
     (d.secSignals||[]).filter(s=>s.level&&s.level!=='clear').forEach(s=>{
       findings.push(s.name+': '+(s.summary||'').replace(/<[^>]+>/g,''));
