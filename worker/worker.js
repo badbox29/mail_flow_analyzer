@@ -29,13 +29,15 @@
  *   nothing. It only queries public DNS via DoH and returns the records.
  *
  * SECURITY / ABUSE
- *   By default this Worker answers any origin (CORS *). If you want to lock it to
- *   your own tool, set ALLOWED_ORIGIN below to your tool's origin (or deploy the
- *   tool and Worker on the same domain). A simple per-request domain-count guard
- *   is included to limit recursion bl-owup.
+ *   Set an ALLOWED_ORIGINS environment variable (Worker → Settings → Variables)
+ *   to a comma-separated list of origins permitted to call this Worker, e.g.
+ *       https://yourtool.example.com, https://badbox29.github.io
+ *   The Worker echoes back the request's Origin only if it is in the list, which
+ *   is how browsers enforce the allowlist. Requests from origins not in the list
+ *   are rejected with 403. If ALLOWED_ORIGINS is unset/empty, or contains "*",
+ *   the Worker allows any origin (the out-of-the-box default). A simple
+ *   per-request recursion guard limits SPF include-chain blowup.
  */
-
-const ALLOWED_ORIGIN = '*';          // set to e.g. 'https://yourtool.example.com' to restrict
 const DOH_ENDPOINT = 'https://cloudflare-dns.com/dns-query'; // upstream DoH used by the Worker
 const SPF_LOOKUP_LIMIT = 10;         // RFC 7208 §4.6.4
 const MAX_SPF_RECORDS = 50;          // hard safety cap on total records resolved per request
@@ -48,13 +50,35 @@ const COMMON_DKIM_SELECTORS = [
 ];
 
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
+    // Resolve the allowed origin for this request from the ALLOWED_ORIGINS env var
+    // (comma-separated). Unset/empty or a "*" entry means allow any origin.
+    const allowList = ((env && env.ALLOWED_ORIGINS) || '')
+      .split(',').map(o => o.trim().toLowerCase()).filter(Boolean);
+    const allowAny = allowList.length === 0 || allowList.includes('*');
+    const reqOrigin = request.headers.get('Origin') || '';
+    const originAllowed = allowAny || allowList.includes(reqOrigin.toLowerCase());
+    // The value echoed back: "*" when open, the exact request origin when allow-listed.
+    const allowOriginValue = allowAny ? '*' : reqOrigin;
+
     const cors = {
-      'Access-Control-Allow-Origin': ALLOWED_ORIGIN,
+      'Access-Control-Allow-Origin': allowOriginValue,
       'Access-Control-Allow-Methods': 'GET, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
+      'Vary': 'Origin',
     };
-    if (request.method === 'OPTIONS') return new Response(null, { headers: cors });
+
+    if (request.method === 'OPTIONS') {
+      // Preflight: honor the allowlist so disallowed origins fail CORS cleanly.
+      return new Response(null, { status: originAllowed ? 204 : 403, headers: cors });
+    }
+
+    // Reject requests from origins not in the allowlist. (Direct hits with no
+    // Origin header — e.g. opening the URL in a browser tab or curl — are allowed,
+    // since CORS only governs cross-origin browser requests.)
+    if (!allowAny && reqOrigin && !originAllowed) {
+      return json({ error: 'Origin not allowed.' }, 403, cors);
+    }
 
     const url = new URL(request.url);
     const domain = (url.searchParams.get('domain') || '').trim().toLowerCase().replace(/[^a-z0-9.\-_]/g, '');
