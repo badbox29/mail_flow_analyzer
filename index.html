@@ -2573,6 +2573,73 @@ function renderDnsSection(dns,domain,loading){
   );
 }
 
+// Derive the headline SPF facts from a resolved DNS result, including the
+// sender-authorization correlation: does a lookup-consuming mechanism that falls
+// PAST the 10-lookup limit correspond to the sending server's own domain? If so,
+// the mechanism that would authorize the sender is never evaluated.
+// Returns {overLimit, lookupCount, findingText, authNote} or null.
+function deriveSpfFinding(dns,senderDomain,sendingServerHost){
+  if(!dns||!dns.spf||!dns.spf.found)return null;
+  const spf=dns.spf;
+  if(spf.lookupCount==null)return null; // only when a Worker provided the count
+  const out={overLimit:!spf.withinLimit,lookupCount:spf.lookupCount,findingText:'',authNote:''};
+  if(spf.withinLimit)return out; // within limit — nothing to headline
+
+  out.findingText=senderDomain+'\'s published SPF record requires '+spf.lookupCount+' DNS lookups, exceeding the RFC 7208 limit of 10. This causes SPF to return a permanent error (permerror), which prevents SPF from passing and typically causes DMARC to fail as well.';
+
+  // Correlation: walk the ordered lookup ledger; find any mechanism past position 10
+  // whose target domain matches the sending server's domain (or the sender domain).
+  const ledger=flattenSpfLookups(spf.tree||[],0,[]);
+  const senderBase=(senderDomain||'').toLowerCase();
+  const serverBase=(sendingServerHost||'').toLowerCase();
+  // registrable-ish base: last two labels (good enough for correlation display)
+  const base2=(h)=>{const p=(h||'').split('.').filter(Boolean);return p.length>=2?p.slice(-2).join('.'):h;};
+  const serverBase2=base2(serverBase),senderBase2=base2(senderBase);
+  let pos=0,correlated=null;
+  for(const m of ledger){
+    pos++;
+    if(pos<=10)continue;
+    const tgt=(m.target||'').replace(/^[^:=]+[:=]/,'').toLowerCase();
+    const tgtBase2=base2(tgt);
+    if((serverBase2&&tgtBase2===serverBase2)||(senderBase2&&tgtBase2===senderBase2)){
+      correlated={pos:pos,mech:m.target,domain:tgtBase2};break;
+    }
+  }
+  if(correlated){
+    out.authNote='The mechanism '+correlated.mech+' — which belongs to the sending domain ('+correlated.domain+') and would authorize this sender — falls at lookup position '+correlated.pos+', past the limit of 10. Because evaluation stops at the limit, that mechanism is never reached, so the sending server is never authorized by SPF. Resolving this requires flattening '+senderDomain+'\'s SPF record so the authorizing mechanism falls within the first 10 lookups.';
+    out.findingText+=' Notably, the mechanism that would authorize the sending server ('+correlated.mech+') falls past the limit and is never evaluated.';
+  }
+  return out;
+}
+
+// After DNS resolves, enhance the already-rendered sections in place:
+// a headline banner, the Auth Summary SPF row, and the stashed copyable-summary data.
+function applyDnsEnhancements(dns,senderDomain,sendingServerHost){
+  const finding=deriveSpfFinding(dns,senderDomain,sendingServerHost);
+  // Stash for the copyable summary regardless
+  if(window._reportData){window._reportData.dnsResult=dns;window._reportData.dnsFinding=finding;}
+  if(!finding||!finding.overLimit)return;
+
+  // 1. Headline banner at the top of results (where the eye lands first)
+  const resEl=document.getElementById('results');
+  if(resEl&&!document.getElementById('dns-headline')){
+    const banner=document.createElement('div');
+    banner.id='dns-headline';
+    banner.style.cssText='background:var(--orange-dim);border:1px solid rgba(245,158,11,.35);border-radius:10px;padding:12px 16px;margin-bottom:14px;display:flex;gap:10px;align-items:flex-start;';
+    banner.innerHTML='<span style="font-size:16px;flex-shrink:0;">🔎</span><div><div style="font-size:13px;font-weight:600;color:var(--orange);margin-bottom:3px;">DNS-confirmed: sender SPF exceeds the lookup limit</div><div style="font-size:12px;color:var(--text-secondary);line-height:1.6;">'+esc(finding.findingText)+(finding.authNote?' '+esc(finding.authNote):'')+' <span style="color:var(--text-muted);">(See Published DNS Records below for the full lookup breakdown.)</span></div></div>';
+    resEl.insertBefore(banner,resEl.firstChild);
+  }
+
+  // 2. Upgrade the Auth Summary SPF row detail, if present
+  const spfDetail=document.getElementById('authdetail-spf');
+  if(spfDetail){
+    const add=document.createElement('div');
+    add.style.cssText='margin-top:8px;padding:8px 10px;background:var(--orange-dim);border:1px solid rgba(245,158,11,.3);border-radius:6px;font-size:12px;color:var(--text-secondary);line-height:1.5;';
+    add.innerHTML='<b style="color:var(--orange);">DNS-confirmed:</b> '+esc(finding.findingText)+(finding.authNote?' '+esc(finding.authNote):'');
+    spfDetail.appendChild(add);
+  }
+}
+
 // Flatten the SPF tree into an ordered list of ONLY the lookup-consuming
 // mechanisms (include/redirect/a/mx/ptr/exists), preserving nesting depth.
 function flattenSpfLookups(nodes,depth,out){
@@ -3537,7 +3604,7 @@ function decodeHeaders(rawOverride, returnHtml){
         <span class="badge ${s.badge}">${authIcon(v||'none')} ${s.short}</span>
         <span style="font-size:12px;color:var(--text-muted);margin-left:4px;">▼</span>
       </div>
-      <div class="auth-expand-body" style="display:none;padding:12px 14px;font-size:13px;color:var(--text-secondary);line-height:1.6;border-top:1px solid var(--border);background:var(--bg-input);">
+      <div class="auth-expand-body" id="authdetail-${d.key}" style="display:none;padding:12px 14px;font-size:13px;color:var(--text-secondary);line-height:1.6;border-top:1px solid var(--border);background:var(--bg-input);">
         ${esc(s.detail)}
         ${wasOverridden?'<div style="margin-top:8px;padding:8px 10px;background:var(--bg-card2);border-radius:6px;font-size:12px;color:var(--text-muted);border:1px solid var(--border);">⚠ Note: The final boundary mail server (e.g. Exchange Online) recorded <b>'+esc(rawV)+'</b> for this check. The result shown above comes from <b>'+esc(effectiveAuth._gateway||'the security gateway')+'</b>, which verified authentication before forwarding. The gateway result is more reliable in this routing path.</div>':''}
         ${renderAuthProvenance(authProvenance[d.key])}
@@ -4043,9 +4110,13 @@ function decodeHeaders(rawOverride, returnHtml){
     const dnsEl=document.getElementById('dns-section');
     if(dnsEl){
       dnsEl.innerHTML=renderDnsSection(null,senderDomain,true); // loading state
+      // Sending server host = the origin hop's reported host (for SPF correlation)
+      const originHop=hops&&hops.length?hops[0]:null;
+      const sendingServerHost=(originHop&&(originHop.fromHost||originHop.from))||'';
       resolveDomainDns(senderDomain,dkimSelector).then(dns=>{
         const el=document.getElementById('dns-section');
-        if(el){el.innerHTML=renderDnsSection(dns,senderDomain,false);window._reportData&&(window._reportData.dnsResult=dns);}
+        if(el){el.innerHTML=renderDnsSection(dns,senderDomain,false);}
+        applyDnsEnhancements(dns,senderDomain,sendingServerHost);
       });
     }
   }
@@ -4839,8 +4910,11 @@ function copyDiagnosticSummary(){
     // Published DNS facts (when a DNS lookup resolved)
     const dnsR=d.dnsResult;
     if(dnsR&&!dnsR.error){
-      if(dnsR.spf&&dnsR.spf.found&&dnsR.spf.lookupCount!=null&&!dnsR.spf.withinLimit)
+      if(dnsR.spf&&dnsR.spf.found&&dnsR.spf.lookupCount!=null&&!dnsR.spf.withinLimit){
         findings.push('Published SPF: '+dnsR.spf.lookupCount+' DNS lookups — EXCEEDS the RFC 7208 limit of 10 (causes SPF permerror)');
+        // Sender-authorization correlation, if the DNS finding derived one
+        if(d.dnsFinding&&d.dnsFinding.authNote)findings.push('  └ '+d.dnsFinding.authNote);
+      }
       else if(dnsR.spf&&!dnsR.spf.found)
         findings.push('Published SPF: no SPF record found in DNS for '+d.senderDomain);
       if(dnsR.dmarc&&dnsR.dmarc.found&&dnsR.dmarc.policy)
