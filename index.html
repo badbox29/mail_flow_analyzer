@@ -626,7 +626,7 @@ textarea::placeholder{color:var(--text-muted);}
         </div>
         <div class="s-row" style="margin-bottom:0;">
           <label class="s-label">Worker URL <span style="font-weight:400;color:var(--text-muted);">(required for Custom Worker)</span></label>
-          <input class="s-input" id="s-dns-worker-url" placeholder="https://mfa-dns.yourname.workers.dev" />
+          <input class="s-input" id="s-dns-worker-url" oninput="onWorkerUrlInput()" placeholder="https://mfa-dns.yourname.workers.dev" />
           <div class="s-hint">Deploy the included <code>worker.js</code> to Cloudflare Workers and paste its URL here. See the project README for deployment steps.</div>
         </div>
       </div>
@@ -2404,7 +2404,11 @@ window._dnsCache=window._dnsCache||{};
 
 function dnsSettings(){
   const s=window._mfaSettings||{};
-  return {enabled:!!s.dnsEnabled,provider:s.dnsProvider||'cloudflare',workerUrl:(s.dnsWorkerUrl||'').trim()};
+  let workerUrl=(s.dnsWorkerUrl||'').trim();
+  // Normalize: a bare hostname (no scheme) would be treated as a relative path by
+  // fetch() and resolve against the current page. Prepend https:// so it's absolute.
+  if(workerUrl&&!/^https?:\/\//i.test(workerUrl))workerUrl='https://'+workerUrl;
+  return {enabled:!!s.dnsEnabled,provider:s.dnsProvider||'cloudflare',workerUrl};
 }
 
 // Direct DoH TXT query (browser → public resolver). Returns array of TXT strings.
@@ -2436,8 +2440,10 @@ async function resolveDomainDns(domain,selector){
       let u=cfg.workerUrl.replace(/\/$/,'')+'/?domain='+encodeURIComponent(domain);
       if(selector)u+='&selector='+encodeURIComponent(selector);
       else u+='&dkim=probe';
-      const resp=await fetch(u);
-      if(!resp.ok)throw new Error('Worker returned '+resp.status);
+      let resp;
+      try{resp=await fetch(u);}
+      catch(netErr){throw new Error('Could not reach the Worker at '+cfg.workerUrl+'. Check the Worker URL in Settings, and that the Worker\'s ALLOWED_ORIGINS permits this site.');}
+      if(!resp.ok)throw new Error('Worker returned '+resp.status+' for '+cfg.workerUrl+'. Verify the Worker URL (it should be the full https:// address) and that the Worker is deployed.');
       result=await resp.json();
       result._source='worker';
     } else {
@@ -4476,7 +4482,7 @@ function saveSettings(){
     vipNames:document.getElementById('s-vip-names').value.trim(),
     dnsEnabled:document.getElementById('s-dns-enabled').checked,
     dnsProvider:document.getElementById('s-dns-provider').value,
-    dnsWorkerUrl:document.getElementById('s-dns-worker-url').value.trim(),
+    dnsWorkerUrl:normalizeWorkerUrl(document.getElementById('s-dns-worker-url').value.trim()),
   };
   localStorage.setItem(SETTINGS_KEY,JSON.stringify(s));
   applySettings(s);
@@ -4522,6 +4528,21 @@ function onDnsToggle(){
   const on=document.getElementById('s-dns-enabled').checked;
   const cond=document.getElementById('s-cond-dns');
   if(cond)cond.style.display=on?'block':'none';
+}
+
+// Ensure a Worker URL has a scheme, so fetch() treats it as absolute, not relative.
+function normalizeWorkerUrl(url){
+  url=(url||'').trim();
+  if(url&&!/^https?:\/\//i.test(url))url='https://'+url;
+  return url;
+}
+
+// Convenience: when the user enters a Worker URL, auto-select the Worker provider
+// (a URL is only useful with that provider) so they don't have to do both steps.
+function onWorkerUrlInput(){
+  const url=document.getElementById('s-dns-worker-url').value.trim();
+  const prov=document.getElementById('s-dns-provider');
+  if(url&&prov&&prov.value!=='worker')prov.value='worker';
 }
 
 function updateSettingsBadge(s){
