@@ -188,6 +188,28 @@ All processing happens locally in your browser. Headers are never transmitted an
 
 ---
 
+## Live DNS Lookups (optional)
+
+By default the tool analyzes only the headers you paste and makes no network requests. You can optionally enable **live DNS lookups** so it also resolves the sender domain's actual published SPF, DKIM, and DMARC records and shows them in a "Published DNS Records" section. This confirms authentication findings against real DNS instead of only inferring from headers — for example, it can definitively show that a domain's SPF record exceeds the RFC 7208 10-lookup limit (the common cause of SPF permerror).
+
+Enable it under **Settings → Live DNS Lookups**. Because it sends the analyzed domain names to a DNS provider, it is off by default. Three provider options:
+
+- **Cloudflare DoH / Google DoH** — direct DNS-over-HTTPS from the browser, no setup. Retrieves the published records but does not perform recursive SPF include-chain expansion.
+- **Custom Worker** — unlocks recursive SPF expansion with exact RFC 7208 lookup counting (needed to detect the "more than 10 lookups" permerror cause). Requires deploying the included Worker.
+
+### Deploying the DNS Worker
+
+The repository includes `worker.js`, a self-contained Cloudflare Worker:
+
+1. Create a new Worker in the Cloudflare dashboard (or `wrangler init`).
+2. Paste `worker.js` as the Worker script and deploy.
+3. Copy the Worker URL (e.g. `https://mfa-dns.yourname.workers.dev`).
+4. In the tool: Settings → Live DNS Lookups → enable, choose **Custom Worker**, paste the URL.
+
+The Worker is stateless, needs no bindings or secrets, uses Cloudflare's edge cache, and stores nothing. By default it accepts any origin (CORS `*`); set `ALLOWED_ORIGIN` in the file to restrict it to your tool's origin.
+
+---
+
 ## Testing
 
 A Node-based regression test harness (`test-harness.js`) validates the parsing and analysis logic without a browser. It extracts the script from `index.html`, runs it in a sandboxed VM context, and asserts on the output of the core functions (header parsing, IP extraction, gateway/system classification, internal-origin awareness, authentication interpretation, the NDR/bounce engine, and the copyable summary).
@@ -203,7 +225,7 @@ It exits 0 if all tests pass and 1 if any fail, so it can be wired into a pre-co
 
 ## Version
 
-v1.7
+v1.8
 
 ---
 

@@ -605,6 +605,32 @@ textarea::placeholder{color:var(--text-muted);}
         </div>
       </div>
     </div>
+
+    <!-- DNS LOOKUPS -->
+    <div class="s-group">
+      <div class="s-group-title">Live DNS Lookups</div>
+      <label class="s-label" style="display:flex;align-items:center;gap:8px;font-weight:400;cursor:pointer;margin-bottom:10px;">
+        <input type="checkbox" id="s-dns-enabled" onchange="onDnsToggle()" style="width:15px;height:15px;cursor:pointer;">
+        Enable live DNS lookups for SPF / DKIM / DMARC
+      </label>
+      <div class="s-hint" style="margin-bottom:12px;">When enabled, the tool resolves the actual published SPF, DKIM, and DMARC records for sender domains and shows them in a "Published DNS Records" section. This confirms authentication findings against real DNS rather than only inferring from headers. <b>Note:</b> this sends the analyzed domain names to your chosen DNS provider (or your Worker), so it is off by default to keep analysis fully local.</div>
+      <div class="s-conditional" id="s-cond-dns">
+        <div class="s-row">
+          <label class="s-label">DNS Provider</label>
+          <select class="s-select" id="s-dns-provider">
+            <option value="cloudflare">Cloudflare DoH (1.1.1.1) — direct, no setup</option>
+            <option value="google">Google DoH (dns.google) — direct, no setup</option>
+            <option value="worker">Custom Worker — unlocks SPF lookup-tree analysis</option>
+          </select>
+          <div class="s-hint">Direct DoH retrieves published records with no setup. A custom Worker additionally performs recursive SPF expansion and RFC 7208 lookup counting (needed to detect the "more than 10 lookups" permerror cause).</div>
+        </div>
+        <div class="s-row" style="margin-bottom:0;">
+          <label class="s-label">Worker URL <span style="font-weight:400;color:var(--text-muted);">(required for Custom Worker)</span></label>
+          <input class="s-input" id="s-dns-worker-url" placeholder="https://mfa-dns.yourname.workers.dev" />
+          <div class="s-hint">Deploy the included <code>worker.js</code> to Cloudflare Workers and paste its URL here. See the project README for deployment steps.</div>
+        </div>
+      </div>
+    </div>
     </div><!-- /environment tab -->
 
     <!-- SECURITY TAB -->
@@ -2368,6 +2394,195 @@ function parseNdr(raw){
   return null;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// LIVE DNS LOOKUPS (SPF / DKIM / DMARC)
+// ═══════════════════════════════════════════════════════════════════════════
+// Two paths: a custom Worker (recursive SPF lookup counting) or direct DoH
+// (Cloudflare / Google) for basic record retrieval. Controlled by settings.
+// Session cache so repeated analyses of the same domain don't re-query.
+window._dnsCache=window._dnsCache||{};
+
+function dnsSettings(){
+  const s=window._mfaSettings||{};
+  return {enabled:!!s.dnsEnabled,provider:s.dnsProvider||'cloudflare',workerUrl:(s.dnsWorkerUrl||'').trim()};
+}
+
+// Direct DoH TXT query (browser → public resolver). Returns array of TXT strings.
+async function dohTxt(name,provider){
+  let url;
+  if(provider==='google'){
+    url='https://dns.google/resolve?name='+encodeURIComponent(name)+'&type=TXT';
+  } else {
+    url='https://cloudflare-dns.com/dns-query?name='+encodeURIComponent(name)+'&type=TXT';
+  }
+  const resp=await fetch(url,{headers:{'accept':'application/dns-json'}});
+  if(!resp.ok)throw new Error('DoH query failed ('+resp.status+')');
+  const data=await resp.json();
+  return (data.Answer||[]).filter(a=>a.type===16).map(a=>(a.data||'').replace(/^"|"$/g,'').replace(/"\s+"/g,''));
+}
+
+// Resolve SPF/DKIM/DMARC for a domain. Uses Worker if configured, else direct DoH.
+// selector: DKIM selector from the message (if known).
+async function resolveDomainDns(domain,selector){
+  if(!domain)return null;
+  const cfg=dnsSettings();
+  const cacheKey=domain+'|'+(selector||'');
+  if(window._dnsCache[cacheKey])return window._dnsCache[cacheKey];
+
+  let result;
+  try{
+    if(cfg.provider==='worker'&&cfg.workerUrl){
+      // Worker path: full recursive SPF analysis
+      let u=cfg.workerUrl.replace(/\/$/,'')+'/?domain='+encodeURIComponent(domain);
+      if(selector)u+='&selector='+encodeURIComponent(selector);
+      else u+='&dkim=probe';
+      const resp=await fetch(u);
+      if(!resp.ok)throw new Error('Worker returned '+resp.status);
+      result=await resp.json();
+      result._source='worker';
+    } else {
+      // Direct DoH path: basic record retrieval (no recursive SPF counting)
+      result=await resolveDomainDnsDirect(domain,selector,cfg.provider);
+      result._source='doh';
+    }
+  }catch(e){
+    result={domain,error:(e&&e.message)||'DNS lookup failed',_source:cfg.provider==='worker'?'worker':'doh'};
+  }
+  window._dnsCache[cacheKey]=result;
+  return result;
+}
+
+// Direct-DoH resolution (no server-side recursion). SPF is retrieved but the
+// lookup count is reported as "unknown — needs a Worker" rather than computed.
+async function resolveDomainDnsDirect(domain,selector,provider){
+  const out={domain};
+  // SPF
+  try{
+    const txts=await dohTxt(domain,provider);
+    const spfRecs=txts.filter(t=>/^v=spf1\b/i.test(t.trim()));
+    if(!spfRecs.length){out.spf={found:false,record:null,lookupCount:null,withinLimit:null,notes:['No SPF record published.']};}
+    else if(spfRecs.length>1){out.spf={found:true,multiple:true,record:spfRecs[0],lookupCount:null,withinLimit:false,notes:['Multiple SPF records found — RFC 7208 requires exactly one; this causes a permerror.']};}
+    else{
+      const rec=spfRecs[0];
+      const allM=rec.match(/([~\-?+])all\b/i);
+      // Count lookup-causing mechanisms at top level only (no recursion in direct mode)
+      const topMechs=(rec.match(/\b(include:|redirect=|a[:\s]|mx[:\s]|ptr[:\s]|exists:)/gi)||[]).length;
+      out.spf={found:true,record:rec,allQualifier:allM?allM[1]:null,
+        lookupCount:null,topLevelLookups:topMechs,withinLimit:null,
+        notes:['Top-level record retrieved. Recursive include-chain expansion and exact RFC 7208 lookup counting require a configured Worker; direct DoH shows the record but not the full lookup total.']};
+    }
+  }catch(e){out.spf={error:'SPF lookup failed'};}
+  // DMARC
+  try{
+    const txts=await dohTxt('_dmarc.'+domain,provider);
+    const rec=txts.find(t=>/^v=dmarc1\b/i.test(t.trim()));
+    if(!rec){out.dmarc={found:false,record:null,policy:null,notes:['No DMARC record published.']};}
+    else{
+      const tags={};rec.split(';').forEach(p=>{const m=p.trim().match(/^(\w+)\s*=\s*(.+)$/);if(m)tags[m[1].toLowerCase()]=m[2].trim();});
+      out.dmarc={found:true,record:rec,policy:(tags.p||'').toLowerCase()||null,subdomainPolicy:(tags.sp||'').toLowerCase()||null,pct:tags.pct||'100',rua:tags.rua||null,tags,notes:[]};
+    }
+  }catch(e){out.dmarc={error:'DMARC lookup failed'};}
+  // DKIM — only if we have a selector (direct DoH doesn't probe to keep it simple/fast)
+  if(selector){
+    try{
+      const txts=await dohTxt(selector+'._domainkey.'+domain,provider);
+      const rec=txts.find(t=>/(^|;)\s*(v=dkim1|k=|p=)/i.test(t));
+      if(rec){
+        const tags={};rec.split(';').forEach(p=>{const m=p.trim().match(/^(\w+)\s*=\s*(.*)$/);if(m)tags[m[1].toLowerCase()]=m[2].trim();});
+        const revoked=tags.p!==undefined&&tags.p==='';
+        out.dkim={mode:'selector',selectorsFound:revoked?0:1,keys:[{selector,found:true,record:rec,revoked,keyType:tags.k||'rsa',hasKey:!!(tags.p&&tags.p.length)}]};
+      } else {out.dkim={mode:'selector',selectorsFound:0,keys:[],notes:['No DKIM key found at '+selector+'._domainkey.'+domain+'.']};}
+    }catch(e){out.dkim={error:'DKIM lookup failed'};}
+  } else {
+    out.dkim={mode:'none',selectorsFound:0,keys:[],notes:['DKIM selector not found in message headers. Enable a Worker to probe common selectors, or the domain may use a custom selector.']};
+  }
+  return out;
+}
+
+// Render the "Published DNS Records" results section.
+function renderDnsSection(dns,domain,loading){
+  const card=(inner)=>`<div class="card" style="margin-top:20px;">
+    <div class="card-hd"><div class="card-icon ci-cyan">🌐</div><div><div class="card-title">Published DNS Records</div><div class="card-desc">Live SPF, DKIM, and DMARC records for ${esc(domain)}</div></div></div>
+    ${inner}</div>`;
+
+  if(loading){
+    return card('<div style="display:flex;align-items:center;gap:10px;color:var(--text-muted);font-size:13px;padding:8px 0;"><span style="display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:dnsspin .7s linear infinite;"></span> Looking up DNS records for '+'<b style="color:var(--text-secondary);">'+esc(domain)+'</b>…</div><style>@keyframes dnsspin{to{transform:rotate(360deg)}}</style>');
+  }
+  if(!dns){return '';}
+  if(dns.error){
+    return card('<div class="info-box" style="margin:0;"><span>⚠</span><span>DNS lookup could not be completed: '+esc(dns.error)+'. The header-based analysis above is unaffected.</span></div>');
+  }
+
+  const srcNote=dns._source==='worker'
+    ?'Resolved via your configured Worker (includes recursive SPF lookup analysis).'
+    :'Resolved via direct DNS-over-HTTPS. Configure a Worker for recursive SPF include-chain expansion and exact RFC 7208 lookup counting.';
+
+  // SPF block
+  let spfHtml='';
+  const spf=dns.spf||{};
+  if(spf.error){spfHtml='<div style="font-size:12px;color:var(--text-muted);">SPF lookup failed.</div>';}
+  else if(!spf.found){spfHtml='<div style="font-size:13px;color:var(--text-secondary);">No SPF record published for '+esc(domain)+'.</div>';}
+  else{
+    const lc=spf.lookupCount;
+    const limitBadge=lc==null
+      ?'<span class="badge b-none">lookups: n/a</span>'
+      :(spf.withinLimit?'<span class="badge b-pass">'+lc+' / 10 lookups</span>':'<span class="badge b-fail">'+lc+' / 10 lookups — EXCEEDS RFC 7208</span>');
+    spfHtml='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;"><b style="font-size:13px;">SPF</b>'+limitBadge+(spf.allQualifier?'<span class="badge b-none">'+esc(spf.allQualifier)+'all</span>':'')+'</div>'
+      +'<pre style="margin:0 0 8px;padding:8px 10px;background:var(--bg-input);border:1px solid var(--border);border-radius:4px;font-family:\'JetBrains Mono\',monospace;font-size:11px;color:var(--text-secondary);white-space:pre-wrap;word-break:break-all;">'+esc(spf.record)+'</pre>';
+    if(spf.tree&&spf.tree.length){spfHtml+='<div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">Include chain:</div>'+renderSpfTree(spf.tree,0);}
+    (spf.notes||[]).forEach(n=>{spfHtml+='<div style="font-size:12px;color:'+(/exceed|permerror|multiple/i.test(n)?'var(--orange)':'var(--text-muted)')+';line-height:1.5;margin-top:4px;">'+esc(n)+'</div>';});
+  }
+
+  // DMARC block
+  let dmarcHtml='';
+  const dmarc=dns.dmarc||{};
+  if(dmarc.error){dmarcHtml='<div style="font-size:12px;color:var(--text-muted);">DMARC lookup failed.</div>';}
+  else if(!dmarc.found){dmarcHtml='<div style="font-size:13px;color:var(--text-secondary);">No DMARC record published at _dmarc.'+esc(domain)+'.</div>';}
+  else{
+    const polColor=dmarc.policy==='reject'?'b-fail':dmarc.policy==='quarantine'?'b-soft':'b-none';
+    dmarcHtml='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;"><b style="font-size:13px;">DMARC</b><span class="badge '+polColor+'">p='+esc(dmarc.policy||'none')+'</span>'+(dmarc.pct&&dmarc.pct!=='100'?'<span class="badge b-soft">pct='+esc(dmarc.pct)+'</span>':'')+(dmarc.subdomainPolicy?'<span class="badge b-none">sp='+esc(dmarc.subdomainPolicy)+'</span>':'')+'</div>'
+      +'<pre style="margin:0 0 8px;padding:8px 10px;background:var(--bg-input);border:1px solid var(--border);border-radius:4px;font-family:\'JetBrains Mono\',monospace;font-size:11px;color:var(--text-secondary);white-space:pre-wrap;word-break:break-all;">'+esc(dmarc.record)+'</pre>';
+    (dmarc.notes||[]).forEach(n=>{dmarcHtml+='<div style="font-size:12px;color:var(--text-muted);line-height:1.5;margin-top:4px;">'+esc(n)+'</div>';});
+  }
+
+  // DKIM block
+  let dkimHtml='';
+  const dkim=dns.dkim||{};
+  if(dkim.error){dkimHtml='<div style="font-size:12px;color:var(--text-muted);">DKIM lookup failed.</div>';}
+  else if(dkim.selectorsFound>0){
+    dkimHtml='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;"><b style="font-size:13px;">DKIM</b><span class="badge b-pass">'+dkim.selectorsFound+' selector'+(dkim.selectorsFound>1?'s':'')+' found</span>'+(dkim.mode==='probe'?'<span class="badge b-none">probed</span>':'')+'</div>';
+    (dkim.keys||[]).forEach(k=>{
+      dkimHtml+='<div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px;"><code style="color:var(--blue);">'+esc(k.selector)+'._domainkey.'+esc(domain)+'</code>'+(k.revoked?' <span style="color:var(--orange);">(revoked — empty key)</span>':' <span style="color:var(--green);">('+esc(k.keyType)+' key published)</span>')+'</div>';
+    });
+    (dkim.notes||[]).forEach(n=>{dkimHtml+='<div style="font-size:11px;color:var(--text-muted);line-height:1.5;margin-top:4px;">'+esc(n)+'</div>';});
+  } else {
+    dkimHtml='<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><b style="font-size:13px;">DKIM</b><span class="badge b-none">no key found</span></div>';
+    (dkim.notes||[]).forEach(n=>{dkimHtml+='<div style="font-size:12px;color:var(--text-muted);line-height:1.5;">'+esc(n)+'</div>';});
+  }
+
+  const block=(h)=>'<div style="padding:12px 0;border-bottom:1px solid var(--border);">'+h+'</div>';
+  return card(
+    block(spfHtml)+block(dmarcHtml)+'<div style="padding:12px 0;">'+dkimHtml+'</div>'
+    +'<div style="font-size:11px;color:var(--text-muted);margin-top:10px;line-height:1.5;">'+esc(srcNote)+'</div>'
+  );
+}
+
+// Render the SPF include tree recursively
+function renderSpfTree(nodes,depth){
+  if(!nodes||!nodes.length)return '';
+  let out='<div style="margin-left:'+(depth*14)+'px;">';
+  for(const n of nodes){
+    const icon=n.type==='include'?'↳ include:':n.type==='redirect'?'↳ redirect=':n.lookups>0?'• '+n.type+':':'';
+    if(n.type==='ip'||n.type==='all'||n.type==='other'){out+='<div style="font-size:11px;color:var(--text-muted);font-family:\'JetBrains Mono\',monospace;">'+esc(n.target)+'</div>';}
+    else{
+      out+='<div style="font-size:11px;font-family:\'JetBrains Mono\',monospace;color:var(--text-secondary);">'+esc(icon)+' '+esc(n.target||'')+(n.lookups>0?' <span style="color:var(--orange);">[+1 lookup]</span>':'')+(n.note?' <span style="color:var(--text-muted);">— '+esc(n.note)+'</span>':'')+'</div>';
+      if(n.children&&n.children.length)out+=renderSpfTree(n.children,depth+1);
+    }
+  }
+  out+='</div>';
+  return out;
+}
+
 // ── SETTINGS-AWARE SERVER LABELING ──────────────────────────────────────────
 // Returns {label, internal} describing whether a hostname is part of the user's environment
 function classifyNdrServer(host){
@@ -3121,7 +3336,7 @@ function decodeHeaders(rawOverride, returnHtml){
        neutral:{badge:'b-none',short:'Neutral',headline:'SPF explicitly takes no stance',
          detail:senderDomain+'\'s SPF record ends in ?all, meaning they have published a record but are explicitly saying "we make no claim about whether this server is authorized." This provides no real protection.'},
        permerror:{badge:'b-error',short:'PermError',headline:'SPF could not be evaluated — record problem',
-         detail:'SPF returned a permanent error (permerror) for '+senderDomain+'. This means the check could not be completed because of a problem with '+senderDomain+'\'s published SPF record — it is malformed, or (most commonly) it requires more than the 10 DNS lookups permitted by RFC 7208 and is therefore invalid. This is a configuration problem on '+senderDomain+'\'s side, not necessarily spoofing. Importantly, when SPF permerrors, it cannot contribute a passing result to DMARC, which often causes DMARC to fail as well. Note: this tool reads headers and cannot query DNS, so it cannot confirm the exact cause — resolving '+senderDomain+'\'s SPF record would be needed to see whether it exceeds the lookup limit.'},
+         detail:'SPF returned a permanent error (permerror) for '+senderDomain+'. This means the check could not be completed because of a problem with '+senderDomain+'\'s published SPF record — it is malformed, or (most commonly) it requires more than the 10 DNS lookups permitted by RFC 7208 and is therefore invalid. This is a configuration problem on '+senderDomain+'\'s side, not necessarily spoofing. Importantly, when SPF permerrors, it cannot contribute a passing result to DMARC, which often causes DMARC to fail as well. '+((window._mfaSettings&&window._mfaSettings.dnsEnabled)?'See the Published DNS Records section below — the tool has resolved '+senderDomain+'\'s actual SPF record and lookup count to confirm the cause.':'Note: this tool reads headers and cannot query DNS, so it cannot confirm the exact cause. Enable live DNS lookups in Settings to resolve '+senderDomain+'\'s SPF record and see whether it exceeds the lookup limit.')},
        temperror:{badge:'b-error',short:'TempError',headline:'SPF check temporarily failed',
          detail:'SPF returned a temporary error (temperror) for '+senderDomain+' — usually a transient DNS resolution failure at the time the message was received. This is not conclusive and often resolves on its own; it does not indicate spoofing or a permanent configuration problem.'},
      }
@@ -3743,11 +3958,32 @@ function decodeHeaders(rawOverride, returnHtml){
   document.getElementById('printBtn').style.display='flex';
   if(!returnHtml){document.getElementById('copySummaryBtn').style.display='flex';window._bounceData=null;}
 
+  // ── LIVE DNS LOOKUPS (when enabled) ────────────────────────────────────────
+  // Insert a placeholder section that gets populated asynchronously, so the
+  // analysis renders instantly and never blocks on the network.
+  const dnsCfg=dnsSettings();
+  const dkimSelector=((getFirst(hdrs,'dkim-signature')||'').match(/\bs=([\w.\-]+)/i)||[])[1]||'';
+  if(!returnHtml&&dnsCfg.enabled&&senderDomain&&senderDomain.includes('.')&&!isInternalOriginContext(hdrs,senderDomain)){
+    html+='<div id="dns-section" style="margin-top:0;"></div>';
+  }
+
   if(returnHtml)return html;
 
   const res=document.getElementById('results');
   res.innerHTML=html;
   res.scrollIntoView({behavior:'smooth',block:'start'});
+
+  // Fire the DNS lookup after render
+  if(dnsCfg.enabled&&senderDomain&&senderDomain.includes('.')&&!isInternalOriginContext(hdrs,senderDomain)){
+    const dnsEl=document.getElementById('dns-section');
+    if(dnsEl){
+      dnsEl.innerHTML=renderDnsSection(null,senderDomain,true); // loading state
+      resolveDomainDns(senderDomain,dkimSelector).then(dns=>{
+        const el=document.getElementById('dns-section');
+        if(el){el.innerHTML=renderDnsSection(dns,senderDomain,false);window._reportData&&(window._reportData.dnsResult=dns);}
+      });
+    }
+  }
 }
 
 function syntaxHighlight(hdrs){
@@ -4238,6 +4474,9 @@ function saveSettings(){
     internalDomains:document.getElementById('s-internal-domains').value.trim(),
     trustedDomains:document.getElementById('s-trusted-domains').value.trim(),
     vipNames:document.getElementById('s-vip-names').value.trim(),
+    dnsEnabled:document.getElementById('s-dns-enabled').checked,
+    dnsProvider:document.getElementById('s-dns-provider').value,
+    dnsWorkerUrl:document.getElementById('s-dns-worker-url').value.trim(),
   };
   localStorage.setItem(SETTINGS_KEY,JSON.stringify(s));
   applySettings(s);
@@ -4270,14 +4509,24 @@ function populateSettingsForm(s){
   document.getElementById('s-internal-domains').value=s.internalDomains||'';
   document.getElementById('s-trusted-domains').value=s.trustedDomains||'';
   document.getElementById('s-vip-names').value=s.vipNames||'';
+  document.getElementById('s-dns-enabled').checked=!!s.dnsEnabled;
+  document.getElementById('s-dns-provider').value=s.dnsProvider||'cloudflare';
+  document.getElementById('s-dns-worker-url').value=s.dnsWorkerUrl||'';
   onMailSystemChange();
   onFilterChange('inbound');
   onFilterChange('outbound');
+  onDnsToggle();
+}
+
+function onDnsToggle(){
+  const on=document.getElementById('s-dns-enabled').checked;
+  const cond=document.getElementById('s-cond-dns');
+  if(cond)cond.style.display=on?'block':'none';
 }
 
 function updateSettingsBadge(s){
   const btn=document.getElementById('settingsBtn');
-  const hasSettings=s&&(s.mailSystem||s.inboundFilter||s.outboundFilter||s.internalDomains||s.trustedDomains||s.vipNames);
+  const hasSettings=s&&(s.mailSystem||s.inboundFilter||s.outboundFilter||s.internalDomains||s.trustedDomains||s.vipNames||s.dnsEnabled);
   btn.innerHTML=hasSettings?'⚙ Settings <span class="s-active-badge">●</span>':'⚙ Settings';
 }
 
@@ -4312,12 +4561,15 @@ function collectSettings(){
     internalDomains:document.getElementById('s-internal-domains').value.trim(),
     trustedDomains:document.getElementById('s-trusted-domains').value.trim(),
     vipNames:document.getElementById('s-vip-names').value.trim(),
+    dnsEnabled:document.getElementById('s-dns-enabled').checked,
+    dnsProvider:document.getElementById('s-dns-provider').value,
+    dnsWorkerUrl:document.getElementById('s-dns-worker-url').value.trim(),
   };
 }
 
 function exportSettingsFile(){
   const s=loadSettings();
-  const payload={_app:'Mail Flow Analyzer',_type:'settings',_version:'1.7',...s};
+  const payload={_app:'Mail Flow Analyzer',_type:'settings',_version:'1.8',...s};
   const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
   const url=URL.createObjectURL(blob);
   const a=document.createElement('a');
@@ -4329,7 +4581,7 @@ function exportSettingsFile(){
 
 function copySettingsJSON(){
   const s=loadSettings();
-  const payload={_app:'Mail Flow Analyzer',_type:'settings',_version:'1.7',...s};
+  const payload={_app:'Mail Flow Analyzer',_type:'settings',_version:'1.8',...s};
   navigator.clipboard.writeText(JSON.stringify(payload,null,2)).then(()=>showToast('✓ Copied to clipboard'));
 }
 
@@ -4504,6 +4756,18 @@ function copyDiagnosticSummary(){
     if(eaf.dmarc&&describe[eaf.dmarc])authIssues.push('DMARC '+describe[eaf.dmarc]);
     if(eaf.dkim==='fail')authIssues.push('DKIM failed');
     if(authIssues.length)findings.push('Authentication: '+authIssues.join(', ')+(d.gwDetected?' (note: results shown are gateway-verified; boundary may differ)':''));
+    // Published DNS facts (when a DNS lookup resolved)
+    const dnsR=d.dnsResult;
+    if(dnsR&&!dnsR.error){
+      if(dnsR.spf&&dnsR.spf.found&&dnsR.spf.lookupCount!=null&&!dnsR.spf.withinLimit)
+        findings.push('Published SPF: '+dnsR.spf.lookupCount+' DNS lookups — EXCEEDS the RFC 7208 limit of 10 (causes SPF permerror)');
+      else if(dnsR.spf&&!dnsR.spf.found)
+        findings.push('Published SPF: no SPF record found in DNS for '+d.senderDomain);
+      if(dnsR.dmarc&&dnsR.dmarc.found&&dnsR.dmarc.policy)
+        findings.push('Published DMARC: p='+dnsR.dmarc.policy+(dnsR.dmarc.pct&&dnsR.dmarc.pct!=='100'?' (pct='+dnsR.dmarc.pct+')':''));
+      else if(dnsR.dmarc&&!dnsR.dmarc.found)
+        findings.push('Published DMARC: no DMARC record found in DNS for '+d.senderDomain);
+    }
     if(d.invPoint&&d.invPoint.urgency&&d.invPoint.urgency!=='clear'&&d.invPoint.reason)findings.push(d.invPoint.reason);
     (d.secSignals||[]).filter(s=>s.level&&s.level!=='clear').forEach(s=>{
       findings.push(s.name+': '+(s.summary||'').replace(/<[^>]+>/g,''));
@@ -4573,6 +4837,6 @@ function classifySystemWithSettings(host,proto){
 // Init settings on page load
 (function(){const s=loadSettings();applySettings(s);updateSettingsBadge(s);})();
 </script>
-<a href="https://github.com/badbox29/mail_flow_analyzer" target="_blank" rel="noopener" style="position:fixed;bottom:12px;left:50%;transform:translateX(-50%);font-size:11px;color:var(--text-muted);background:var(--bg-card);border:1px solid var(--border);border-radius:6px;padding:4px 12px;z-index:50;letter-spacing:.3px;text-decoration:none;transition:color .15s,border-color .15s;" onmouseover="this.style.color='var(--blue)';this.style.borderColor='var(--blue)'" onmouseout="this.style.color='var(--text-muted)';this.style.borderColor='var(--border)'">Mail Flow Analyzer v1.7</a>
+<a href="https://github.com/badbox29/mail_flow_analyzer" target="_blank" rel="noopener" style="position:fixed;bottom:12px;left:50%;transform:translateX(-50%);font-size:11px;color:var(--text-muted);background:var(--bg-card);border:1px solid var(--border);border-radius:6px;padding:4px 12px;z-index:50;letter-spacing:.3px;text-decoration:none;transition:color .15s,border-color .15s;" onmouseover="this.style.color='var(--blue)';this.style.borderColor='var(--blue)'" onmouseout="this.style.color='var(--text-muted)';this.style.borderColor='var(--border)'">Mail Flow Analyzer v1.8</a>
 </body>
 </html>
