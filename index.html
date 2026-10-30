@@ -1033,6 +1033,68 @@ function parseReceived(val){
   };
 }
 
+// Build a provenance map: for each auth key, which header supplied the effective
+// value and the raw header text behind it. Used to show evidence in the auth summary.
+function buildAuthProvenance(hdrs, auth, authOrig, effectiveAuth, gatewayMode, gwName){
+  const prov={};
+  const keys=['spf','dkim','dmarc','arc','compauth'];
+  // Gather candidate source headers with their raw text
+  const arVals=getAll(hdrs,'authentication-results');
+  const arOrigVals=getAll(hdrs,'authentication-results-original');
+  const arcVals=getAll(hdrs,'arc-authentication-results');
+  const spfHdr=getFirst(hdrs,'received-spf');
+  const dkimSig=getFirst(hdrs,'dkim-signature');
+  const findRaw=(name,predicate)=>{
+    const vals=getAll(hdrs,name);
+    for(const v of vals){ if(!predicate||predicate(v))return v; }
+    return null;
+  };
+  for(const key of keys){
+    const effVal=effectiveAuth?effectiveAuth[key]:null;
+    if(!effVal)continue;
+    let sourceLabel='',sourceHeader='',rawLine='',note='';
+    // In gateway mode, the effective value for a check may come from the gateway's
+    // Authentication-Results-Original (when the boundary differed).
+    const boundaryVal=auth?auth[key]:null;
+    const origVal=authOrig?authOrig[key]:null;
+    if(gatewayMode&&origVal&&origVal!==boundaryVal&&effVal===origVal){
+      sourceLabel=gwName+' (pre-forward verification)';
+      sourceHeader='Authentication-Results-Original';
+      rawLine=arOrigVals[0]||'';
+      note='This result was recorded by '+gwName+' before it forwarded the message. It is the authoritative result for this check because the boundary server re-checked after the gateway altered the routing path.';
+    } else if(key==='arc'){
+      sourceLabel='ARC chain';
+      sourceHeader='ARC-Authentication-Results';
+      rawLine=arcVals[0]||'';
+      note='ARC (Authenticated Received Chain) preserves authentication results recorded at each hop, so they survive forwarding.';
+    } else if(key==='spf'&&boundaryVal===effVal&&arVals.some(v=>/spf=/i.test(v))){
+      sourceLabel='Receiving boundary server';
+      sourceHeader='Authentication-Results';
+      rawLine=findRaw('authentication-results',v=>/spf=/i.test(v))||arVals[0]||'';
+      note='SPF result as recorded by the server that received this message.';
+    } else if(key==='spf'&&spfHdr&&!arVals.some(v=>/spf=/i.test(v))){
+      sourceLabel='Receiving boundary server';
+      sourceHeader='Received-SPF';
+      rawLine=spfHdr;
+      note='Taken from the Received-SPF header, written by the boundary server.';
+    } else if(key==='dkim'&&effVal==='present'&&dkimSig){
+      sourceLabel='Message carries a DKIM signature';
+      sourceHeader='DKIM-Signature';
+      rawLine=(dkimSig.length>200?dkimSig.slice(0,200)+'…':dkimSig);
+      note='A DKIM-Signature header is present on the message, but no verification result was recorded in an Authentication-Results header on this path.';
+    } else {
+      // Default: boundary Authentication-Results
+      sourceLabel='Receiving boundary server';
+      sourceHeader='Authentication-Results';
+      const re=new RegExp(key+'=','i');
+      rawLine=findRaw('authentication-results',v=>re.test(v))||arVals[0]||'';
+      note='Result as recorded by the server that received this message.';
+    }
+    prov[key]={sourceLabel,sourceHeader,rawLine:rawLine||'(raw header not available)',note,boundaryVal,origVal,effVal};
+  }
+  return prov;
+}
+
 function parseAuth(val){
   const r={};
   const spfM=val.match(/spf=([\w]+)/i);
@@ -2758,6 +2820,11 @@ function decodeHeaders(rawOverride, returnHtml){
   const gwName=(gatewayHop&&gatewayHop.sys?gatewayHop.sys.name:gw.detectedGatewayName)||'Security Gateway';
   const gatewayNote=gatewayMode?` (verified by ${gwName} before forwarding)`:'';
 
+  // ── AUTHENTICATION EVIDENCE PROVENANCE ─────────────────────────────────────
+  // For each auth result, record WHICH header supplied the effective value and the
+  // exact raw header line, so the user can see the evidence behind each verdict.
+  const authProvenance=buildAuthProvenance(hdrs, auth, authOrig, effectiveAuth, gatewayMode, gwName);
+
   // Detect final mail provider and hybrid Exchange
   const {mailProvider,isHybrid}=detectMailProvider(hops,hdrs);
 
@@ -3149,6 +3216,7 @@ function decodeHeaders(rawOverride, returnHtml){
       <div class="auth-expand-body" style="display:none;padding:12px 14px;font-size:13px;color:var(--text-secondary);line-height:1.6;border-top:1px solid var(--border);background:var(--bg-input);">
         ${esc(s.detail)}
         ${wasOverridden?'<div style="margin-top:8px;padding:8px 10px;background:var(--bg-card2);border-radius:6px;font-size:12px;color:var(--text-muted);border:1px solid var(--border);">⚠ Note: The final boundary mail server (e.g. Exchange Online) recorded <b>'+esc(rawV)+'</b> for this check. The result shown above comes from <b>'+esc(effectiveAuth._gateway||'the security gateway')+'</b>, which verified authentication before forwarding. The gateway result is more reliable in this routing path.</div>':''}
+        ${renderAuthProvenance(authProvenance[d.key])}
       </div>
     </div>`;
   }
@@ -3658,6 +3726,21 @@ function toggleAuthItem(hd){
   const open=body.style.display==='none';
   body.style.display=open?'block':'none';
   if(chev)chev.textContent=open?'▲':'▼';
+}
+// Render the evidence-provenance block for an auth row (source header + raw line)
+function renderAuthProvenance(p){
+  if(!p)return '';
+  const rawId='prov-'+Math.random().toString(36).slice(2);
+  return `<div style="margin-top:10px;padding:10px 12px;background:var(--bg-card2);border:1px solid var(--border);border-radius:6px;">
+    <div style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Evidence Source</div>
+    <div style="display:flex;flex-wrap:wrap;gap:4px 16px;font-size:12px;margin-bottom:6px;">
+      <div><span style="color:var(--text-muted);">Supplied by:</span> <b style="color:var(--text-primary);">${esc(p.sourceLabel)}</b></div>
+      <div><span style="color:var(--text-muted);">Header:</span> <code style="color:var(--blue);font-family:'JetBrains Mono',monospace;">${esc(p.sourceHeader)}</code></div>
+    </div>
+    ${p.note?`<div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:8px;">${esc(p.note)}</div>`:''}
+    <div onclick="var e=document.getElementById('${rawId}');e.style.display=e.style.display==='none'?'block':'none';this.querySelector('span').textContent=e.style.display==='none'?'▸ Show raw header':'▾ Hide raw header';" style="cursor:pointer;font-size:11px;color:var(--blue);user-select:none;"><span>▸ Show raw header</span></div>
+    <pre id="${rawId}" style="display:none;margin:6px 0 0;padding:8px 10px;background:var(--bg-input);border:1px solid var(--border);border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-secondary);white-space:pre-wrap;word-break:break-all;line-height:1.5;">${esc(p.rawLine)}</pre>
+  </div>`;
 }
 function toggleHop(i){
   const det=document.getElementById('hd-'+i);
